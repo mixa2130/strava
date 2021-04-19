@@ -2,12 +2,28 @@ import asyncio
 import aiohttp
 import os
 import time
+import logging
 
 from bs4 import BeautifulSoup as Bs
 from lxml import html
 from dotenv import load_dotenv
 from async_class import AsyncClass
 from typing import NoReturn
+from contextlib import asynccontextmanager
+from sys import stdout
+
+# Configure logging
+logger = logging.getLogger('strava_crawler')
+logger.setLevel(logging.DEBUG)
+
+handler = logging.StreamHandler(stdout)
+handler.setLevel(logging.DEBUG)
+
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                              datefmt='%Y-%m-%d %H:%M:%S')
+
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 
 async def get_html(session, uri):
@@ -47,20 +63,21 @@ class Strava(AsyncClass):
         tree = html.fromstring(text)
         return tree.xpath('//*[@name="csrf-token"]/@content')
 
-    async def get_strava_nickname_from_uri(self, profile_uri: str):
-        subscriber_russian_athlete = profile_uri.find('Профиль пользователя ')
-        if subscriber_russian_athlete != -1:
-            return profile_uri[subscriber_russian_athlete + 21:profile_uri.find(' в Strava')]
+    async def get_strava_nickname_from_uri(self, profile_uri: str) -> str:
+        """
+        If page not found - ''
 
-        subscriber_foreign_athlete = profile_uri.find('Check out ')
-        if subscriber_foreign_athlete != -1:
-            return profile_uri[subscriber_foreign_athlete + 10:profile_uri.find(' on Strava')]
-
+        :param profile_uri:
+        :return:
+        """
         response = await self._session.get(profile_uri)
-        # if response.status != 200:
-        #     raise ConnectionError
-        loop = asyncio.get_event_loop()
-        soup = await loop.run_in_executor(None, bs_object, await response.text())
+
+        if response.status != 200:
+            logger.info(f'status {profile_uri} - {response.status}')
+            return ''
+
+        soup_loop = asyncio.get_event_loop()
+        soup = await soup_loop.run_in_executor(None, bs_object, await response.text())
 
         title = soup.select_one('title').text
         return title[(title.find('| ') + 2):]
@@ -69,18 +86,32 @@ class Strava(AsyncClass):
         await self._session.close()
 
 
-async def main():
-    login = os.getenv('LOGIN')
-    password = os.getenv('PASSWORD')
-
+@asynccontextmanager
+async def strava_connector(login, password):
     small_strava = await Strava(login, password)
 
+    try:
+        yield small_strava
+    except Exception as exc:
+        logger.error(repr(exc))
+    finally:
+        await small_strava.close()
+
+
+async def get_nicknames(strava_obj):
     loop = asyncio.get_event_loop()
     uris_generator = await loop.run_in_executor(None, read_file, 'strava_uris.txt')
-    tasks = [asyncio.create_task(small_strava.get_strava_nickname_from_uri(uri)) for uri in uris_generator]
+    tasks = [asyncio.create_task(strava_obj.get_strava_nickname_from_uri(uri)) for uri in uris_generator]
     results = await asyncio.gather(*tasks)
     print(results, len(results))
-    await small_strava.close()
+
+
+async def main():
+    _login = os.getenv('LOGIN')
+    _password = os.getenv('PASSWORD')
+
+    async with strava_connector(_login, _password) as strava:
+        await get_nicknames(strava)
 
 
 if __name__ == '__main__':
