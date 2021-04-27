@@ -1,14 +1,16 @@
-import asyncio
-import aiohttp
 import logging
+import asyncio
+
+from typing import NoReturn
+from contextlib import asynccontextmanager
+from sys import stdout
+
+import aiohttp
 
 from bs4 import BeautifulSoup as Bs
 from lxml import html
 from async_class import AsyncClass
-from typing import NoReturn
-from contextlib import asynccontextmanager
-from sys import stdout
-from exceptions import StravaSessionFailed, StravaTooManyRequests
+from .exceptions import StravaSessionFailed, StravaTooManyRequests
 
 # Configure logging
 logger = logging.getLogger('strava_crawler')
@@ -58,6 +60,12 @@ class Strava(AsyncClass):
         return await self._session.post('https://www.strava.com/session', data=parameters)
 
     async def _session_reconnecting(self) -> int:
+        """
+        Updates or reconnects strava session
+
+        :return: 0 - session established;
+                 -1 - can't reconnect
+        """
         allowed_attempts: int = 3
 
         for check_counter in range(allowed_attempts):
@@ -68,7 +76,7 @@ class Strava(AsyncClass):
 
             if not connection:
                 await asyncio.sleep(7)
-                logger.error(f'{check_counter + 1} of {allowed_attempts} attempt to connect has failed')
+                logger.error('%i of %i attempt to connect has failed', check_counter + 1, allowed_attempts)
             else:
                 logger.info('Session established')
                 return 0
@@ -82,45 +90,45 @@ class Strava(AsyncClass):
         return tree.xpath('//*[@name="csrf-token"]/@content')
 
     @staticmethod
-    async def connection_check(request_response):
+    async def connection_check(request_response) -> bool:
         """
         Checks the strava page connection by parsing the html code
 
-        # :param html_text: html code
-        # :type html_text: str
 
         :returns: - True - the connection is establish;
                   - False - the connection isn't established.
-        :rtype: bool
         """
         html_text = await request_response.text()
 
         if html_text[:500].find('logged-out') == -1:
-            "We've logged-in"
+            # We've logged-in
             return True
-        else:
-            "Strava logged us out, maybe there is an alert message"
-            soup_loop = asyncio.get_event_loop()
-            soup = await soup_loop.run_in_executor(None, bs_object, html_text)
 
-            alert_message = soup.select_one('div.alert-message')
-            if alert_message is not None:
-                logger.error(alert_message.text)
+        # Strava logged us out, maybe there is an alert message
+        soup_loop = asyncio.get_event_loop()
+        soup = await soup_loop.run_in_executor(None, bs_object, html_text)
 
-            return False
+        alert_message = soup.select_one('div.alert-message')
+        if alert_message is not None:
+            logger.error('alert message in a page: %s', alert_message.text)
+
+        return False
 
     async def get_response(self, uri):
         """
         In my mind - this function has to proceed and return "get" request response.
-        It has to proceed such errors, as 429, ServerDisconnectedError,
+        It has to proceed such errors, as 429, ServerDisconnectedError, ..
 
-        :param uri:
-        :return:
+
+        :param uri: requested page
+
+        :raise StravaSessionFailed: if unable to reconnect or update strava session
+        :return: request result obj
         """
         try:
             return await self._session.get(uri)
         except aiohttp.ServerDisconnectedError:
-            logger.info(f'ServerDisconnectedError in get_strava_nickname_from_uri {uri}')
+            logger.info('ServerDisconnectedError in get_strava_nickname_from_uri %s', uri)
 
             if self.connection_established:
                 # We would like to reconnect just one time,
@@ -140,10 +148,11 @@ class Strava(AsyncClass):
 
     async def get_strava_nickname_from_uri(self, profile_uri: str) -> str:
         """
-        If page not found - ''
+        Gets nickname from strava user profile page.
+        If page not found - def will return''.
 
-        :param profile_uri:
-        :return:
+        :param profile_uri: strava user profile uri
+        :return: user nickname from transmitted uri
         """
         response = await self.get_response(profile_uri)
 
@@ -151,7 +160,7 @@ class Strava(AsyncClass):
             raise StravaTooManyRequests
 
         if response.status != 200:
-            logger.info(f'status {profile_uri} - {response.status}')
+            logger.info('status %s - %i', profile_uri, response.status)
             return ''
 
         soup_loop = asyncio.get_event_loop()
@@ -160,7 +169,7 @@ class Strava(AsyncClass):
         title = soup.select_one('title').text
         return title[(title.find('| ') + 2):]
 
-    def check_connection_setup(self):
+    def check_connection_setup(self) -> bool:
         return self.connection_established
 
     async def __adel__(self) -> None:
@@ -168,7 +177,13 @@ class Strava(AsyncClass):
 
 
 @asynccontextmanager
-async def strava_connector(login, password):
+async def strava_connector(login: str, password: str):
+    """
+    Context manager for working with instances of Strava class.
+
+    :param login: strava login
+    :param password: strava password
+    """
     small_strava = await Strava(login, password)
 
     try:
@@ -183,5 +198,3 @@ async def strava_connector(login, password):
     finally:
         await small_strava.close()
         logger.info('Session closed')
-
-        # exit(0)
