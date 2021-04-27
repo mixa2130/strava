@@ -1,8 +1,8 @@
 # strava
-Asynchronous spider for web-scraping data from Strava.
+The strava project aims to provide an ability to quickly get big data not provided via current API.
 
-The main goals, set during the development, were: performance in working with a large amount of data, 
-and system stability.
+The main goals, set during the development, were: performance and clarity in working with a large amount of data, 
+and, of course, system stability.
 
 ##### Note
 This project was developed as a part of [strava_run_battle](https://gitlab.com/mixa2130/strava_run_battle) project and
@@ -23,8 +23,6 @@ LOGIN="abrakadabra@example.com"
 PASSWORD="abrakadabra"
 ```
 
-## Exceptions
-The following errors may occur during operation:
+## Basic Usage
 
-* `StravaSessionFailed` - unable to create or update strava session;
-* `StravaTooManyRequests` - http 429 status code - too many requests per time unit.
+Please take a look at [examples](https://github.com/mixa2130/strava/tree/master/examples) if something remained unclear
