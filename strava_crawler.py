@@ -49,19 +49,9 @@ class Strava(AsyncClass):
         self._password: str = password
         self.connection_established: bool = False
 
-        allowed_attempts: int = 2
-        for check_counter in range(allowed_attempts):
-            # This one will try to reconnect the session,
-            # if connection wasn't established in the first attempt
-            session_response = await self._registration()
-            connection = await self.connection_check(session_response)
-            if not connection:
-                await asyncio.sleep(3)
-                logger.error(f'{check_counter + 1} of {allowed_attempts} attempt to connect has failed')
-            else:
-                logger.info('Session established')
-                self.connection_established = True
-                break
+        connection = await self._session_reconnecting()
+        if connection == 0:
+            self.connection_established = True
 
         # Session connection failure would be proceed in a context manager
 
@@ -75,6 +65,25 @@ class Strava(AsyncClass):
                       }
 
         return await self._session.post('https://www.strava.com/session', data=parameters)
+
+    async def _session_reconnecting(self) -> int:
+        allowed_attempts: int = 3
+
+        for check_counter in range(allowed_attempts):
+            # This one will try to reconnect the session,
+            # if connection wasn't established in the first attempt
+            session_response = await self._registration()
+            connection = await self.connection_check(session_response)
+
+            if not connection:
+                await asyncio.sleep(7)
+                logger.error(f'{check_counter + 1} of {allowed_attempts} attempt to connect has failed')
+            else:
+                logger.info('Session established')
+                return 0
+
+        # Can't reconnect
+        return -1
 
     @staticmethod
     async def _csrf_token(text: str):
@@ -116,15 +125,8 @@ class Strava(AsyncClass):
         """
         In my mind - this function has to proceed and return "get" request response.
         It has to proceed such errors, as 429, ServerDisconnectedError,
-        aiohttp.ClientResponseError,
-                aiohttp.ClientRequestError,
-                aiohttp.ClientOSError,
-                aiohttp.errors.ClientDisconnectedError,
-                aiohttp.errors.ClientTimeoutError,
-                asyncio.TimeoutError,
-                aiohttp.errors.HttpProcessingError
 
-        :param url:
+        :param uri:
         :return:
         """
         try:
@@ -133,47 +135,20 @@ class Strava(AsyncClass):
             logger.info(f'ServerDisconnectedError in get_strava_nickname_from_uri {uri}')
 
             if self.connection_established:
+                # We would like to reconnect just one time,
+                # and not as much as tasks will come
                 self.connection_established = False
 
-                await self._registration()
+                connection = await self._session_reconnecting()
+                if connection == -1:
+                    raise StravaSessionFailed
+
                 self.connection_established = True
             else:
                 while not self.connection_established:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(4)
 
             return await self._session.get(uri)
-
-    #     try:
-    #         raise aiohttp.ServerDisconnectedError
-    #         return await self._session.get(uri)
-    #     except aiohttp.ServerDisconnectedError:
-    #         logger.info(f'ServerDisconnectedError in get_strava_nickname_from_uri')
-    #
-    #         if self.connection_established:
-    #             self.connection_established = False
-    #
-    #             allowed_attempts: int = 2
-    #             for check_counter in range(allowed_attempts):
-    #                 # This one will try to reconnect the session,
-    #                 # if connection wasn't established in the first attempt
-    #                 session_response = await self._registration()
-    #                 connection = await self.connection_check(session_response)
-    #                 if not connection:
-    #                     await asyncio.sleep(3)
-    #                     logger.error(f'{check_counter + 1} of {allowed_attempts} attempt to connect has failed')
-    #                 else:
-    #                     logger.info('Session established')
-    #                     self.connection_established = True
-    #                     break
-    #
-    #             if not self.connection_established:
-    #                 raise asyncio.CancelledError
-    #
-    #         else:
-    #             while not self.connection_established:
-    #                 await asyncio.sleep(2)
-    #
-    #         return await self._session.get(uri)
 
     async def get_strava_nickname_from_uri(self, profile_uri: str) -> str:
         """
@@ -183,12 +158,6 @@ class Strava(AsyncClass):
         :return:
         """
         response = await self.get_response(profile_uri)
-        # try:
-        #     response = await self._session.get(profile_uri)
-        # except aiohttp.ServerDisconnectedError:
-        #     logger.info(f'ServerDisconnectedError in get_strava_nickname_from_uri {profile_uri}')
-        #     await self._registration()
-        #     response = await self._session.get(profile_uri)
 
         if response.status == 429:
             raise StravaTooManyRequests
@@ -213,7 +182,6 @@ async def strava_connector(login, password):
 
     try:
         if not small_strava.check_connection_setup():
-            logger.error('Unable to connect')
             raise StravaSessionFailed
 
         yield small_strava
@@ -248,7 +216,6 @@ async def main():
         await get_nicknames(strava)
 
 
-# https://github.com/aio-libs/aiohttp/issues/850
 if __name__ == '__main__':
     start = time.time()
     load_dotenv()

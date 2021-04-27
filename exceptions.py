@@ -1,5 +1,5 @@
 class StravaSessionFailed(Exception):
-    """Unable to create or update session"""
+    """Unable to create or update strava session"""
     def __repr__(self):
         return "Unable to create or update strava session"
 
