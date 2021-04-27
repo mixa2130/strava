@@ -11,7 +11,7 @@ from async_class import AsyncClass
 from typing import NoReturn
 from contextlib import asynccontextmanager
 from sys import stdout
-from exceptions import StravaSessionFailed
+from exceptions import StravaSessionFailed, StravaTooManyRequests
 
 # Configure logging
 logger = logging.getLogger('strava_crawler')
@@ -112,21 +112,37 @@ class Strava(AsyncClass):
     def check_connection_setup(self):
         return self.connection_established
 
-    # async def get_response(self, uri):
-    #     """
-    #     In my mind - this function has to proceed and return "get" request response.
-    #     It has to proceed such errors, as 429, ServerDisconnectedError,
-    #     aiohttp.ClientResponseError,
-    #             aiohttp.ClientRequestError,
-    #             aiohttp.ClientOSError,
-    #             aiohttp.errors.ClientDisconnectedError,
-    #             aiohttp.errors.ClientTimeoutError,
-    #             asyncio.TimeoutError,
-    #             aiohttp.errors.HttpProcessingError
-    #
-    #     :param url:
-    #     :return:
-    #     """
+    async def get_response(self, uri):
+        """
+        In my mind - this function has to proceed and return "get" request response.
+        It has to proceed such errors, as 429, ServerDisconnectedError,
+        aiohttp.ClientResponseError,
+                aiohttp.ClientRequestError,
+                aiohttp.ClientOSError,
+                aiohttp.errors.ClientDisconnectedError,
+                aiohttp.errors.ClientTimeoutError,
+                asyncio.TimeoutError,
+                aiohttp.errors.HttpProcessingError
+
+        :param url:
+        :return:
+        """
+        try:
+            return await self._session.get(uri)
+        except aiohttp.ServerDisconnectedError:
+            logger.info(f'ServerDisconnectedError in get_strava_nickname_from_uri {uri}')
+
+            if self.connection_established:
+                self.connection_established = False
+
+                await self._registration()
+                self.connection_established = True
+            else:
+                while not self.connection_established:
+                    await asyncio.sleep(2)
+
+            return await self._session.get(uri)
+
     #     try:
     #         raise aiohttp.ServerDisconnectedError
     #         return await self._session.get(uri)
@@ -166,23 +182,16 @@ class Strava(AsyncClass):
         :param profile_uri:
         :return:
         """
-        # response = await self.get_response(profile_uri)
-        try:
-            response = await self._session.get(profile_uri)
-        except aiohttp.ServerDisconnectedError:
-            logger.info(f'ServerDisconnectedError in get_strava_nickname_from_uri {profile_uri}')
-            await self._registration()
-            response = await self._session.get(profile_uri)
+        response = await self.get_response(profile_uri)
+        # try:
+        #     response = await self._session.get(profile_uri)
+        # except aiohttp.ServerDisconnectedError:
+        #     logger.info(f'ServerDisconnectedError in get_strava_nickname_from_uri {profile_uri}')
+        #     await self._registration()
+        #     response = await self._session.get(profile_uri)
 
         if response.status == 429:
-            logger.info('429 - start waiting')
-            await asyncio.sleep(4)
-            try:
-                response = await self._session.get(profile_uri)
-            except aiohttp.ServerDisconnectedError:
-                logger.info('ServerDisconnectedError in get_strava_nickname_from_uri')
-                await self._registration()
-                response = await self._session.get(profile_uri)
+            raise StravaTooManyRequests
 
         if response.status != 200:
             logger.info(f'status {profile_uri} - {response.status}')
@@ -201,7 +210,7 @@ class Strava(AsyncClass):
 @asynccontextmanager
 async def strava_connector(login, password):
     small_strava = await Strava(login, password)
-    await asyncio.sleep(4)
+
     try:
         if not small_strava.check_connection_setup():
             logger.error('Unable to connect')
@@ -213,6 +222,8 @@ async def strava_connector(login, password):
     finally:
         await small_strava.close()
         logger.info('Session closed')
+
+        exit(0)
 
 
 async def get_nicknames(strava_obj):
