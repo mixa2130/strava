@@ -13,8 +13,8 @@ from async_class import AsyncClass
 from .exceptions import StravaSessionFailed, StravaTooManyRequests
 
 # Configure logging
-logger = logging.getLogger('strava_crawler')
-logger.setLevel(logging.DEBUG)
+LOGGER = logging.getLogger('strava_crawler')
+LOGGER.setLevel(logging.DEBUG)
 
 handler = logging.StreamHandler(stdout)
 handler.setLevel(logging.DEBUG)
@@ -23,12 +23,7 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
                               datefmt='%Y-%m-%d %H:%M:%S')
 
 handler.setFormatter(formatter)
-logger.addHandler(handler)
-
-
-async def get_html(session, uri):
-    response = await session.get(uri)
-    return await response.text()
+LOGGER.addHandler(handler)
 
 
 def bs_object(text):
@@ -40,19 +35,25 @@ class Strava(AsyncClass):
         self._session = aiohttp.ClientSession()
         self._login: str = login
         self._password: str = password
+
         self.connection_established: bool = False
 
         connection = await self._session_reconnecting()
         if connection == 0:
             self.connection_established = True
 
-        # Session connection failure would be proceed in a context manager
+        # Session connection failure during initialization would be proceed in a context manager
 
-    async def _registration(self):
-        html_text: str = await get_html(self._session, 'https://www.strava.com/login')
-        token: list = await self._csrf_token(html_text)
+    async def _strava_authorization(self):
+        """
+        Makes authorization for current strava session.
 
-        parameters = {'authenticity_token': token[0],
+        :return: aiohttp auth request information
+        """
+        html_text: str = await self._get_html('https://www.strava.com/login')
+        csrf_token: str = self._csrf_token(html_text)
+
+        parameters = {'authenticity_token': csrf_token,
                       'email': self._login,
                       'password': self._password
                       }
@@ -61,7 +62,7 @@ class Strava(AsyncClass):
 
     async def _session_reconnecting(self) -> int:
         """
-        Updates or reconnects strava session
+        Updates or reconnects strava session.
 
         :return: 0 - session established;
                  -1 - can't reconnect
@@ -71,23 +72,36 @@ class Strava(AsyncClass):
         for check_counter in range(allowed_attempts):
             # This one will try to reconnect the session,
             # if connection wasn't established in the first attempt
-            session_response = await self._registration()
+            session_response = await self._strava_authorization()
             connection = await self.connection_check(session_response)
 
             if not connection:
                 await asyncio.sleep(7)
-                logger.error('%i of %i attempt to connect has failed', check_counter + 1, allowed_attempts)
+                LOGGER.error('%i of %i attempt to connect has failed', check_counter + 1, allowed_attempts)
             else:
-                logger.info('Session established')
+                LOGGER.info('Session established')
                 return 0
 
         # Can't reconnect
         return -1
 
     @staticmethod
-    async def _csrf_token(text: str):
+    def _csrf_token(text: str) -> str:
+        """
+        Extracts the csrf token from the passed html text.
+
+        :param text: html page code
+        :return: csrf token from page code
+        """
         tree = html.fromstring(text)
-        return tree.xpath('//*[@name="csrf-token"]/@content')
+        tokens: list = tree.xpath('//*[@name="csrf-token"]/@content')
+
+        return tokens[0]
+
+    async def _get_html(self, uri) -> str:
+        """Gets html page code """
+        response = await self._session.get(uri)
+        return await response.text()
 
     @staticmethod
     async def connection_check(request_response) -> bool:
@@ -110,7 +124,7 @@ class Strava(AsyncClass):
 
         alert_message = soup.select_one('div.alert-message')
         if alert_message is not None:
-            logger.error('alert message in a page: %s', alert_message.text)
+            LOGGER.error('alert message in a page: %s', alert_message.text)
 
         return False
 
@@ -128,7 +142,7 @@ class Strava(AsyncClass):
         try:
             return await self._session.get(uri)
         except aiohttp.ServerDisconnectedError:
-            logger.info('ServerDisconnectedError in get_strava_nickname_from_uri %s', uri)
+            LOGGER.info('ServerDisconnectedError in get_strava_nickname_from_uri %s', uri)
 
             if self.connection_established:
                 # We would like to reconnect just one time,
@@ -149,9 +163,11 @@ class Strava(AsyncClass):
     async def get_strava_nickname_from_uri(self, profile_uri: str) -> str:
         """
         Gets nickname from strava user profile page.
-        If page not found - def will return''.
+        If page not found - def will return '' - an empty str.
 
         :param profile_uri: strava user profile uri
+        :raise StravaTooManyRequests: too many requests per time unit -
+         strava won't let us in for 10 minutes at least
         :return: user nickname from transmitted uri
         """
         response = await self.get_response(profile_uri)
@@ -160,7 +176,7 @@ class Strava(AsyncClass):
             raise StravaTooManyRequests
 
         if response.status != 200:
-            logger.info('status %s - %i', profile_uri, response.status)
+            LOGGER.info('status %s - %i', profile_uri, response.status)
             return ''
 
         soup_loop = asyncio.get_event_loop()
@@ -183,6 +199,8 @@ async def strava_connector(login: str, password: str):
 
     :param login: strava login
     :param password: strava password
+
+    :raise StravaSessionFailed: if unable to reconnect or update strava session
     """
     small_strava = await Strava(login, password)
 
@@ -193,8 +211,8 @@ async def strava_connector(login: str, password: str):
         yield small_strava
 
     except Exception as exc:
-        logger.error(repr(exc))
+        LOGGER.error(repr(exc))
 
     finally:
         await small_strava.close()
-        logger.info('Session closed')
+        LOGGER.info('Session closed')

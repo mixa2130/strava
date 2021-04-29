@@ -24,5 +24,20 @@ PASSWORD="abrakadabra"
 ```
 
 ## Basic Usage
+Strava class provides a convenient logger which can help you to understand what's happening - ___do not avoid it___!
 
-Please take a look at [examples](https://github.com/mixa2130/strava/tree/master/examples) if something remained unclear
+```
+2021-04-29 18:02:30 - strava_crawler - INFO - Session established
+2021-04-29 18:03:08 - strava_crawler - INFO - status https://www.starva.com/athletes/.. - 404
+2021-04-29 18:03:35 - strava_crawler - INFO - ServerDisconnectedError in get_strava_nickname_from_uri https://www.starva.com/athletes/..
+2021-04-29 18:03:43 - strava_crawler - INFO - status https://www.starva.com/athletes/.. - 404
+2021-04-29 18:03:44 - strava_crawler - ERROR - alert message in a page: You must be logged out before attempting to log in again.
+2021-04-29 18:03:51 - strava_crawler - ERROR - 1 of 3 attempt to connect has failed
+2021-04-29 18:03:54 - strava_crawler - INFO - Session established
+2021-04-29 18:03:59 - strava_crawler - INFO - status https://www.starva.com/athletes/.. - 404
+2021-04-29 18:04:48 - strava_crawler - INFO - status https://www.starva.com/athletes/.. - 404
+2021-04-29 18:04:48 - strava_crawler - INFO - Session closed
+```
+
+## Still reading?
+Take a look at [examples](https://github.com/mixa2130/strava/tree/master/examples) if something remained unclear
