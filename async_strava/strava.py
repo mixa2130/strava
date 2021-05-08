@@ -1,14 +1,17 @@
 import logging
+import re
 import asyncio
 
-from typing import NoReturn
+from typing import NoReturn, NamedTuple, List
 from contextlib import asynccontextmanager
 from sys import stdout
 
 import aiohttp
 
+from datetime import datetime, timezone
 from bs4 import BeautifulSoup as Bs
 from lxml import html
+from urllib.parse import urljoin
 from async_class import AsyncClass
 from .exceptions import StravaSessionFailed, StravaTooManyRequests
 
@@ -24,6 +27,12 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 
 handler.setFormatter(formatter)
 LOGGER.addHandler(handler)
+
+
+class Activity(NamedTuple):
+    route_exist: bool
+    activity_datetime: datetime
+    user_nickname: str
 
 
 def bs_object(text):
@@ -104,6 +113,22 @@ class Strava(AsyncClass):
         return await response.text()
 
     @staticmethod
+    def utc_to_local(timestamp: str):
+        """
+        UTC timestamp converter
+
+        Output instance:
+        datetime.datetime(2021, 5, 8, 18, 38, 29, tzinfo=datetime.timezone(datetime.timedelta(seconds=10800), 'MSK'))
+
+        :param timestamp: utc timestamp in format '0000-00-00 00:00:00 UTC'
+        :type timestamp: str
+
+        :return: local timestamp in datetime format
+        """
+        utc_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S UTC")
+        return utc_dt.replace(tzinfo=timezone.utc).astimezone(tz=None)
+
+    @staticmethod
     async def connection_check(request_response) -> bool:
         """
         Checks the strava page connection by parsing the html code
@@ -119,7 +144,7 @@ class Strava(AsyncClass):
             return True
 
         # Strava logged us out, maybe there is an alert message
-        soup_loop = asyncio.get_event_loop()
+        soup_loop = asyncio.get_running_loop()()
         soup = await soup_loop.run_in_executor(None, bs_object, html_text)
 
         alert_message = soup.select_one('div.alert-message')
@@ -179,11 +204,47 @@ class Strava(AsyncClass):
             LOGGER.info('status %s - %i', profile_uri, response.status)
             return ''
 
-        soup_loop = asyncio.get_event_loop()
+        soup_loop = asyncio.get_running_loop()
         soup = await soup_loop.run_in_executor(None, bs_object, await response.text())
 
         title = soup.select_one('title').text
         return title[(title.find('| ') + 2):]
+
+    # async def _process_activity_page(self, activity_href: str):
+    #     resp = await self.get_response(activity_href)
+
+    async def _process_activity_cluster(self, activity_cluster) -> Activity:
+        # activity_cluster is a bs object: class 'bs4.element.Tag'
+        reg = re.compile('[\n]')
+        entry_head = activity_cluster.select_one('div.entry-head')
+
+        timestamp = entry_head.select_one('time.timestamp').get('datetime')
+        local_dt = self.utc_to_local(timestamp)
+
+        raw_nickname = reg.sub('', entry_head.select_one('a.entry-athlete').text)
+        subscriber_index = raw_nickname.find('Subscriber')
+        nickname = raw_nickname[0:subscriber_index] if subscriber_index != -1 else raw_nickname
+
+        route = True if activity_cluster.select('a.entry-image.activity-map') else False
+        activity_href = activity_cluster.select_one('h3.entry-title.activity-title').select_one('strong') \
+            .select_one('a').get('href')
+
+        return Activity(route, local_dt, nickname)
+
+    async def get_club_activities(self, club_id: int):
+        club_activities_page_url = 'https://www.strava.com/clubs/%s/recent_activity' % club_id
+        response = await self.get_response(club_activities_page_url)
+
+        soup_loop = asyncio.get_running_loop()
+        soup = await soup_loop.run_in_executor(None, bs_object, await response.text())
+
+        single_activities_blocks = soup.select('div.activity.entity-details.feed-entry')
+        # As for single, as for group activities
+        activities_tasks = [asyncio.create_task(self._process_activity_cluster(cluster)) for cluster in
+                            single_activities_blocks]
+
+        results: List[Activity] = await asyncio.gather(*activities_tasks)
+        # print(results)
 
     def check_connection_setup(self) -> bool:
         return self.connection_established
