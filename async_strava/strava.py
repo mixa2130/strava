@@ -1,3 +1,6 @@
+"""
+Ignoring non run activities
+"""
 import logging
 import re
 import asyncio
@@ -11,9 +14,8 @@ import aiohttp
 from datetime import datetime, timezone
 from bs4 import BeautifulSoup as Bs
 from lxml import html
-from urllib.parse import urljoin
 from async_class import AsyncClass
-from .exceptions import StravaSessionFailed, StravaTooManyRequests
+from .exceptions import StravaSessionFailed, StravaTooManyRequests, NonRunActivity, ActivityNotExist
 
 # Configure logging
 LOGGER = logging.getLogger('strava_crawler')
@@ -31,9 +33,9 @@ LOGGER.addHandler(handler)
 
 class ActivityValues(NamedTuple):
     distance: float
-    # time: dict  # {'min': 13, 'sec': 7}
-    pace: dict  # {'min_km': 6, 'sec_km': 25}
-    # height: int
+    moving_time: dict  # {'hours': 0, 'min': 13, 'sec': 7}
+    avg_pace: dict  # {'min_km': 6, 'sec_km': 25}
+    # elevation_gain: int
     # calories: int
     # device: str
     # gear: str
@@ -46,9 +48,6 @@ class Activity(NamedTuple):
     activity_title: str
     activity_values: ActivityValues
 
-
-# def default_ActivityValues() -> ActivityValues:
-#     return ActivityValues(-1,)
 
 def bs_object(text):
     return Bs(text, 'html.parser')
@@ -237,7 +236,10 @@ class Strava(AsyncClass):
         # activity might be deleted recently. In this case strava redirects to the profile page
         if stat_section:
             activity_details = stat_section.select('li')
+
             distance = 0
+            moving_time = {'hours': 0, 'minutes': 0, 'seconds': 0}
+            pace: dict = {'min_km': 0, 'sec_km': 0}
 
             for index, item in enumerate(activity_details):
                 tmp = item.select_one('strong').text
@@ -246,19 +248,34 @@ class Strava(AsyncClass):
                 if index == 0:
                     distance = float(tmp[0:tmp.find('km')])
 
+                # moving time
+                if index == 1:
+                    time_values: List[str] = tmp.split(':')
+
+                    if len(time_values) == 3:
+                        for time_index, key in enumerate(moving_time.keys()):
+                            moving_time[key] = int(time_values[time_index])
+                    else:
+                        moving_time['minutes'] = int(time_values[0])
+                        moving_time['seconds'] = int(time_values[1])
+
                 # pace
                 if index == 2:
                     time_separator_index = tmp.find(':')
                     if time_separator_index == -1:
+                        # check description: text 'pace'
                         # There is no pace at activity page,
-                        # which means a non-running activity, such as cardio
-                        return -1
+                        # which means a non-running activity, such as cardio,
+                        # which had been written as a run
+                        raise NonRunActivity(activity_href)
 
                     pace_min = int(tmp[0:time_separator_index])
                     pace_sec = int(tmp[time_separator_index + 1:time_separator_index + 3])
                     pace: dict = {'min_km': pace_min, 'sec_km': pace_sec}
 
-            return ActivityValues(distance=distance, pace=pace)
+            return ActivityValues(distance=distance, avg_pace=pace, moving_time=moving_time)
+
+        raise ActivityNotExist(activity_href)
 
     async def _process_activity_cluster(self, activity_cluster) -> Activity:
         # activity_cluster is a bs object: class 'bs4.element.Tag'
@@ -278,10 +295,17 @@ class Strava(AsyncClass):
         activity_href = entry_body.get('href')
         activity_title = entry_body.text
 
-        activity_values = await self._process_activity_page('https://www.strava.com/' + activity_href)
-        return Activity(route_exist=route, activity_datetime=local_dt,
-                        activity_title=activity_title.strip(), user_nickname=nickname,
-                        activity_values=activity_values)
+        try:
+            activity_values = await self._process_activity_page('https://www.strava.com/' + activity_href)
+            return Activity(route_exist=route, activity_datetime=local_dt,
+                            activity_title=activity_title.strip(), user_nickname=nickname,
+                            activity_values=activity_values)
+
+        except NonRunActivity as exc:
+            LOGGER.info(repr(exc))
+
+        except ActivityNotExist as exc:
+            LOGGER.info(repr(exc))
 
     async def get_club_activities(self, club_id: int):
         club_activities_page_url = 'https://www.strava.com/clubs/%s/recent_activity' % club_id
@@ -295,7 +319,10 @@ class Strava(AsyncClass):
                             single_activities_blocks]
 
         results: List[Activity] = await asyncio.gather(*activities_tasks)
-        # print(results)
+
+        # checker
+        for activity in results:
+            print(activity, '\n')
 
     def check_connection_setup(self) -> bool:
         return self.connection_established

@@ -13,3 +13,24 @@ class StravaTooManyRequests(Exception):
 
     def __repr__(self):
         return "Http 429 status code - too many requests per time unit"
+
+
+class NonRunActivity(Exception):
+    """Non-running activity, such as cardio"""
+
+    def __init__(self, activity_uri: str):
+        self.uri = activity_uri
+
+    def __repr__(self):
+        return f"Non-running activity {self.uri}"
+
+
+class ActivityNotExist(Exception):
+    """Activity might be deleted recently.
+    In this case strava redirects to the profile page"""
+
+    def __init__(self, activity_uri: str):
+        self.uri = activity_uri
+
+    def __repr__(self):
+        return f'Activity {self.uri} has been deleted'
