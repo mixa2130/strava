@@ -29,11 +29,26 @@ handler.setFormatter(formatter)
 LOGGER.addHandler(handler)
 
 
+class ActivityValues(NamedTuple):
+    distance: float
+    # time: dict  # {'min': 13, 'sec': 7}
+    pace: dict  # {'min_km': 6, 'sec_km': 25}
+    # height: int
+    # calories: int
+    # device: str
+    # gear: str
+
+
 class Activity(NamedTuple):
     route_exist: bool
-    activity_datetime: datetime
     user_nickname: str
+    activity_datetime: datetime
+    activity_title: str
+    activity_values: ActivityValues
 
+
+# def default_ActivityValues() -> ActivityValues:
+#     return ActivityValues(-1,)
 
 def bs_object(text):
     return Bs(text, 'html.parser')
@@ -94,6 +109,17 @@ class Strava(AsyncClass):
         # Can't reconnect
         return -1
 
+    async def _get_html(self, uri) -> str:
+        """Gets html page code """
+        response = await self._session.get(uri)
+        return await response.text()
+
+    @staticmethod
+    async def _get_soup(html_text: str):
+        """Executes blocking task in an executor - another thread"""
+        soup_loop = asyncio.get_running_loop()
+        return await soup_loop.run_in_executor(None, bs_object, html_text)
+
     @staticmethod
     def _csrf_token(text: str) -> str:
         """
@@ -106,11 +132,6 @@ class Strava(AsyncClass):
         tokens: list = tree.xpath('//*[@name="csrf-token"]/@content')
 
         return tokens[0]
-
-    async def _get_html(self, uri) -> str:
-        """Gets html page code """
-        response = await self._session.get(uri)
-        return await response.text()
 
     @staticmethod
     def utc_to_local(timestamp: str):
@@ -128,8 +149,7 @@ class Strava(AsyncClass):
         utc_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S UTC")
         return utc_dt.replace(tzinfo=timezone.utc).astimezone(tz=None)
 
-    @staticmethod
-    async def connection_check(request_response) -> bool:
+    async def connection_check(self, request_response) -> bool:
         """
         Checks the strava page connection by parsing the html code
 
@@ -144,8 +164,7 @@ class Strava(AsyncClass):
             return True
 
         # Strava logged us out, maybe there is an alert message
-        soup_loop = asyncio.get_running_loop()()
-        soup = await soup_loop.run_in_executor(None, bs_object, html_text)
+        soup = await self._get_soup(html_text)
 
         alert_message = soup.select_one('div.alert-message')
         if alert_message is not None:
@@ -204,14 +223,42 @@ class Strava(AsyncClass):
             LOGGER.info('status %s - %i', profile_uri, response.status)
             return ''
 
-        soup_loop = asyncio.get_running_loop()
-        soup = await soup_loop.run_in_executor(None, bs_object, await response.text())
+        soup = await self._get_soup(await response.text())
 
         title = soup.select_one('title').text
         return title[(title.find('| ') + 2):]
 
-    # async def _process_activity_page(self, activity_href: str):
-    #     resp = await self.get_response(activity_href)
+    async def _process_activity_page(self, activity_href: str) -> ActivityValues:
+        response = await self.get_response(activity_href)
+        soup = await self._get_soup(await response.text())
+
+        stat_section = soup.select_one('ul.inline-stats.section')
+
+        # activity might be deleted recently. In this case strava redirects to the profile page
+        if stat_section:
+            activity_details = stat_section.select('li')
+            distance = 0
+
+            for index, item in enumerate(activity_details):
+                tmp = item.select_one('strong').text
+
+                # distance
+                if index == 0:
+                    distance = float(tmp[0:tmp.find('km')])
+
+                # pace
+                if index == 2:
+                    time_separator_index = tmp.find(':')
+                    if time_separator_index == -1:
+                        # There is no pace at activity page,
+                        # which means a non-running activity, such as cardio
+                        return -1
+
+                    pace_min = int(tmp[0:time_separator_index])
+                    pace_sec = int(tmp[time_separator_index + 1:time_separator_index + 3])
+                    pace: dict = {'min_km': pace_min, 'sec_km': pace_sec}
+
+            return ActivityValues(distance=distance, pace=pace)
 
     async def _process_activity_cluster(self, activity_cluster) -> Activity:
         # activity_cluster is a bs object: class 'bs4.element.Tag'
@@ -226,17 +273,21 @@ class Strava(AsyncClass):
         nickname = raw_nickname[0:subscriber_index] if subscriber_index != -1 else raw_nickname
 
         route = True if activity_cluster.select('a.entry-image.activity-map') else False
-        activity_href = activity_cluster.select_one('h3.entry-title.activity-title').select_one('strong') \
-            .select_one('a').get('href')
+        entry_body = activity_cluster.select_one('h3.entry-title.activity-title').select_one('strong').select_one('a')
 
-        return Activity(route, local_dt, nickname)
+        activity_href = entry_body.get('href')
+        activity_title = entry_body.text
+
+        activity_values = await self._process_activity_page('https://www.strava.com/' + activity_href)
+        return Activity(route_exist=route, activity_datetime=local_dt,
+                        activity_title=activity_title.strip(), user_nickname=nickname,
+                        activity_values=activity_values)
 
     async def get_club_activities(self, club_id: int):
         club_activities_page_url = 'https://www.strava.com/clubs/%s/recent_activity' % club_id
         response = await self.get_response(club_activities_page_url)
 
-        soup_loop = asyncio.get_running_loop()
-        soup = await soup_loop.run_in_executor(None, bs_object, await response.text())
+        soup = await self._get_soup(await response.text())
 
         single_activities_blocks = soup.select('div.activity.entity-details.feed-entry')
         # As for single, as for group activities
