@@ -5,7 +5,7 @@ import logging
 import re
 import asyncio
 
-from typing import NoReturn, NamedTuple, List
+from typing import NoReturn, List
 from contextlib import asynccontextmanager
 from sys import stdout
 
@@ -16,6 +16,7 @@ from bs4 import BeautifulSoup as Bs
 from lxml import html
 from async_class import AsyncClass
 from .exceptions import StravaSessionFailed, StravaTooManyRequests, NonRunActivity, ActivityNotExist
+from .attributes import Activity, ActivityValues
 
 # Configure logging
 LOGGER = logging.getLogger('strava_crawler')
@@ -31,29 +32,13 @@ handler.setFormatter(formatter)
 LOGGER.addHandler(handler)
 
 
-class ActivityValues(NamedTuple):
-    distance: float
-    moving_time: dict  # {'hours': 0, 'min': 13, 'sec': 7}
-    avg_pace: dict  # {'min_km': 6, 'sec_km': 25}
-    # elevation_gain: int
-    # calories: int
-    # device: str
-    # gear: str
-
-
-class Activity(NamedTuple):
-    route_exist: bool
-    user_nickname: str
-    activity_datetime: datetime
-    activity_title: str
-    activity_values: ActivityValues
-
-
 def bs_object(text):
     return Bs(text, 'html.parser')
 
 
 class Strava(AsyncClass):
+    """Main class for interacting  with www.strava.com website"""
+
     async def __ainit__(self, login: str, password: str) -> NoReturn:
         self._session = aiohttp.ClientSession()
         self._login: str = login
@@ -227,30 +212,34 @@ class Strava(AsyncClass):
         title = soup.select_one('title').text
         return title[(title.find('| ') + 2):]
 
-    async def _process_activity_page(self, activity_href: str) -> ActivityValues:
-        response = await self.get_response(activity_href)
-        soup = await self._get_soup(await response.text())
+    @staticmethod
+    async def _process_inline_section(stat_section, activity_href: str) -> dict:
+        """
+        Processes activity page inline-stats-section
 
-        stat_section = soup.select_one('ul.inline-stats.section')
+        :param activity_href: activity uri
+        :param stat_section: inline-stats-section html cluster
 
-        # activity might be deleted recently. In this case strava redirects to the profile page
+        :return {distance:, moving_time:, pace:}
+        """
+
         if stat_section:
-            activity_details = stat_section.select('li')
-
             distance = 0
             moving_time = {'hours': 0, 'minutes': 0, 'seconds': 0}
             pace: dict = {'min_km': 0, 'sec_km': 0}
 
-            for index, item in enumerate(activity_details):
-                tmp = item.select_one('strong').text
+            activity_details = stat_section.select('li')
+            for item in activity_details:
+                tmp = item.select_one('div.label').text
 
-                # distance
-                if index == 0:
-                    distance = float(tmp[0:tmp.find('km')])
+                cluster_type = tmp.strip()
+                cluster = item.select_one('strong').text
 
-                # moving time
-                if index == 1:
-                    time_values: List[str] = tmp.split(':')
+                if cluster_type == 'Distance':
+                    distance = float(cluster[0:cluster.find('km')])
+
+                if cluster_type == 'Moving Time':
+                    time_values: List[str] = cluster.split(':')
 
                     if len(time_values) == 3:
                         for time_index, key in enumerate(moving_time.keys()):
@@ -259,23 +248,32 @@ class Strava(AsyncClass):
                         moving_time['minutes'] = int(time_values[0])
                         moving_time['seconds'] = int(time_values[1])
 
-                # pace
-                if index == 2:
-                    time_separator_index = tmp.find(':')
-                    if time_separator_index == -1:
-                        # check description: text 'pace'
-                        # There is no pace at activity page,
-                        # which means a non-running activity, such as cardio,
-                        # which had been written as a run
-                        raise NonRunActivity(activity_href)
+                if cluster_type == 'Pace':
+                    pace_values: List[str] = cluster.split(':')  # ['7', '18/km']
 
-                    pace_min = int(tmp[0:time_separator_index])
-                    pace_sec = int(tmp[time_separator_index + 1:time_separator_index + 3])
-                    pace: dict = {'min_km': pace_min, 'sec_km': pace_sec}
+                    sec_km: str = pace_values[1][:pace_values[1].find('/')]
+                    pace: dict = {'min_km': int(pace_values[0]), 'sec_km': int(sec_km)}
 
-            return ActivityValues(distance=distance, avg_pace=pace, moving_time=moving_time)
+            if (pace['min_km'] == 0 and pace['sec_km'] == 0) or distance == 0:
+                raise NonRunActivity(activity_href)
 
+            return {'distance': distance, 'moving_time': moving_time, 'avg_pace': pace}
+
+        # Activity might be deleted recently. In this case strava redirects to the profile page
         raise ActivityNotExist(activity_href)
+
+    async def _process_activity_page(self, activity_href: str) -> ActivityValues:
+        response = await self.get_response(activity_href)
+        soup = await self._get_soup(await response.text())
+
+        # Distance, Moving time, Pace block
+        inline_section: dict = await self._process_inline_section(
+            stat_section=soup.select_one('ul.inline-stats.section'),
+            activity_href=activity_href)
+
+        return ActivityValues(distance=inline_section['distance'],
+                              moving_time=inline_section['moving_time'],
+                              avg_pace=inline_section['avg_pace'])
 
     async def _process_activity_cluster(self, activity_cluster) -> Activity:
         # activity_cluster is a bs object: class 'bs4.element.Tag'
@@ -289,7 +287,7 @@ class Strava(AsyncClass):
         subscriber_index = raw_nickname.find('Subscriber')
         nickname = raw_nickname[0:subscriber_index] if subscriber_index != -1 else raw_nickname
 
-        route = True if activity_cluster.select('a.entry-image.activity-map') else False
+        route = bool(activity_cluster.select('a.entry-image.activity-map'))
         entry_body = activity_cluster.select_one('h3.entry-title.activity-title').select_one('strong').select_one('a')
 
         activity_href = entry_body.get('href')
