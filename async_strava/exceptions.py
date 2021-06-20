@@ -26,8 +26,10 @@ class NonRunActivity(Exception):
 
 
 class ActivityNotExist(Exception):
-    """Activity might be deleted recently.
-    In this case strava redirects to the profile page"""
+    """
+    Activity might be deleted recently.
+    In this case strava redirects to the profile page
+    """
 
     def __init__(self, activity_uri: str):
         self.uri = activity_uri

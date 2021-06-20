@@ -29,9 +29,6 @@ async def get_nicknames(strava_obj) -> List[str]:
     """
     semaphore = asyncio.Semaphore(200)  # works as a resource counter
     async with semaphore:
-        # # you can use synchronous reading, it's just my own "night" preference
-        # loop = asyncio.get_event_loop()
-        # uris_generator = await loop.run_in_executor(None, read_file, 'strava_uris.txt')
         uris_generator = read_file()
         tasks = [asyncio.create_task(strava_obj.get_strava_nickname_from_uri(uri)) for uri in uris_generator]
 
@@ -45,8 +42,10 @@ async def main() -> NoReturn:
     _password: str = os.getenv('PASSWORD')
 
     async with async_strava.strava_connector(_login, _password) as strava_obj:
-        nicknames: list = await get_nicknames(strava_obj)
-        print(nicknames)
+        await strava_obj.get_club_activities(558646)
+        # await strava_obj._process_activity_page('https://www.strava.com/activities/5296674540')
+        # nicknames: list = await get_nicknames(strava_obj)
+        # print(nicknames)
         # await get_nicknames(strava_obj)
         # await get_nicknames(strava_obj)
         # await get_nicknames(strava_obj)

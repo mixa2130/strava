@@ -6,8 +6,10 @@ and, of course, system stability.
 
 ##### Note
 This project was developed as a part of [strava_run_battle](https://gitlab.com/mixa2130/strava_run_battle) project and
-will be updated as needed.
+will be updated as needed. But it's also an open source project - so you always can take part in it:)
 
+If you would like to see some extra functions - as getting activity splits, segments.. 
+Just open a new issue with a description why you need such functionality
 
 ## Installation
 (Installing in a [virtual environment](https://pypi.python.org/pypi/virtualenv) is always recommended.)
