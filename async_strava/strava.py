@@ -8,10 +8,10 @@ import asyncio
 from typing import NoReturn, List
 from contextlib import asynccontextmanager
 from sys import stdout
+from datetime import datetime, timezone
 
 import aiohttp
 
-from datetime import datetime, timezone
 from bs4 import BeautifulSoup as Bs
 from lxml import html
 from async_class import AsyncClass
@@ -262,6 +262,52 @@ class Strava(AsyncClass):
         # Activity might be deleted recently. In this case strava redirects to the profile page
         raise ActivityNotExist(activity_href)
 
+    @staticmethod
+    def _convert_calories_str_to_int_value(raw_calories: str) -> int:
+        find_res: int = raw_calories.find(',')
+        if find_res != -1:
+            return int(raw_calories[:find_res] + raw_calories[find_res + 1:])
+        return int(raw_calories)
+
+    async def _process_more_stats(self, more_stats_section):
+        elevation_gain: int = 0
+        calories: int = 0
+
+        if more_stats_section:
+            rows = more_stats_section.select('div.row')
+            for row in rows:
+                values = row.select('div.spans3')
+                descriptions = row.select('div.spans5')
+
+                for index, desc in enumerate(descriptions):
+                    if desc.text.strip() == 'Elevation':
+                        # We get value in format '129m\n'
+                        elevation = re.match('[0-9]+', values[index].text)
+
+                        if elevation is not None:
+                            elevation_gain = int(elevation.group())
+
+                    if desc.text.strip() == 'Calories':
+                        calories_value: str = values[index].text.strip()
+
+                        if calories_value != '—':
+                            calories: int = self._convert_calories_str_to_int_value(calories_value)
+                        print(calories)
+
+        return {'elevation_gain': elevation_gain, 'calories': calories}
+
+    @staticmethod
+    async def _process_device_section(device_section):
+        # почитать про await
+        # device: str = '-'
+        # gear: str = '-'
+
+        device = device_section.select_one('div.device').text.strip()
+        gear = device_section.select_one('div.gear').text.strip()
+        # print(device, gear)
+
+        return {'device': device, 'gear': gear}
+
     async def _process_activity_page(self, activity_href: str) -> ActivityValues:
         response = await self.get_response(activity_href)
         soup = await self._get_soup(await response.text())
@@ -271,9 +317,22 @@ class Strava(AsyncClass):
             stat_section=soup.select_one('ul.inline-stats.section'),
             activity_href=activity_href)
 
+        more_stats_section: dict = await self._process_more_stats(
+            more_stats_section=soup.select_one('div.section.more-stats')
+        )
+
+        #
+        # device_section = await self._process_device_section(
+        #     device_section=soup.select_one('div.section.device-section')
+        # )
+
         return ActivityValues(distance=inline_section['distance'],
                               moving_time=inline_section['moving_time'],
                               avg_pace=inline_section['avg_pace'])
+                              # elevation_gain=more_stats_section['elevation_gain'],
+                              # calories=more_stats_section['calories'],
+                              # device=device_section['device'],
+                              # gear=device_section['gear'])
 
     async def _process_activity_cluster(self, activity_cluster) -> Activity:
         # activity_cluster is a bs object: class 'bs4.element.Tag'
@@ -308,7 +367,6 @@ class Strava(AsyncClass):
     async def get_club_activities(self, club_id: int):
         club_activities_page_url = 'https://www.strava.com/clubs/%s/recent_activity' % club_id
         response = await self.get_response(club_activities_page_url)
-
         soup = await self._get_soup(await response.text())
 
         single_activities_blocks = soup.select('div.activity.entity-details.feed-entry')
@@ -319,8 +377,8 @@ class Strava(AsyncClass):
         results: List[Activity] = await asyncio.gather(*activities_tasks)
 
         # checker
-        for activity in results:
-            print(activity, '\n')
+        # for activity in results:
+        #     print(activity, '\n')
 
     def check_connection_setup(self) -> bool:
         return self.connection_established
@@ -334,6 +392,7 @@ async def strava_connector(login: str, password: str):
     """
     Context manager for working with instances of Strava class.
 
+    Available Runtmeerror: generator didn't yield
     :param login: strava login
     :param password: strava password
 
