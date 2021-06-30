@@ -249,6 +249,7 @@ class Strava(AsyncClass):
         :param activity_href: activity uri
         :param stat_section: inline-stats section html cluster
 
+        :raise ActivityNotExist: Activity has been deleted
         :return {distance:, moving_time:, pace:}
         """
         if stat_section:
