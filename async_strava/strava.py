@@ -241,10 +241,10 @@ class Strava(AsyncClass):
     @staticmethod
     async def _process_inline_section(stat_section, activity_href: str) -> dict:
         """
-        Processes activity page inline-stats-section
+        Processes activity page inline-stats section.
 
         :param activity_href: activity uri
-        :param stat_section: inline-stats-section html cluster
+        :param stat_section: inline-stats section html cluster
 
         :return {distance:, moving_time:, pace:}
         """
@@ -289,26 +289,28 @@ class Strava(AsyncClass):
         raise ActivityNotExist(activity_href)
 
     @staticmethod
-    def _convert_calories_str_to_int_value(raw_calories: str) -> int:
-        find_res: int = raw_calories.find(',')
-        if find_res != -1:
-            return int(raw_calories[:find_res] + raw_calories[find_res + 1:])
-        return int(raw_calories)
+    async def _process_more_stats(more_stats_section) -> dict:
+        """
+        Processes activity page more-stats section.
 
-    async def _process_more_stats(self, more_stats_section):
+        :param more_stats_section: more-stats section html cluster
+
+        :return: {elevation_gain:, calories:}
+        """
         elevation_gain: int = 0
         calories: int = 0
 
         if more_stats_section:
             rows = more_stats_section.select('div.row')
+
             for row in rows:
                 values = row.select('div.spans3')
                 descriptions = row.select('div.spans5')
 
                 for index, desc in enumerate(descriptions):
                     if desc.text.strip() == 'Elevation':
-                        # We get value in format '129m\n'
-                        elevation = re.match('[0-9]+', values[index].text)
+                        # We get value in format '129m\n' or '\n129m\n'
+                        elevation = re.search('[0-9]+', values[index].text)
 
                         if elevation is not None:
                             elevation_gain = int(elevation.group())
@@ -316,13 +318,21 @@ class Strava(AsyncClass):
                     if desc.text.strip() == 'Calories':
                         calories_value: str = values[index].text.strip()
 
+                        # We can get calories in such views: '-' <=> 0, '684', '1,099' <=> 1099
                         if calories_value != '—':
-                            calories: int = self._convert_calories_str_to_int_value(calories_value)
+                            calories: int = int(re.sub(r',', r'', calories_value))
 
         return {'elevation_gain': elevation_gain, 'calories': calories}
 
     @staticmethod
     def _process_device_section(device_section) -> dict:
+        """
+        Processes activity page device section.
+
+        :param device_section: device section html cluster
+
+        :return: {device:, gear:}
+        """
         gear = '-'
         device: str = '-'
 
@@ -342,6 +352,14 @@ class Strava(AsyncClass):
         return {'device': device, 'gear': tuple(gear)}
 
     async def _process_activity_page(self, activity_href: str) -> ActivityValues:
+        """
+        Processes activity page, which contains 3 importable sections for us:
+            1) inline-stats section - distance, moving time, pace blocks;
+            2) more-stats section - elevation gain, calories blocks;
+            3) device section - device, gear blocks.
+
+        :param activity_href: activity page uri
+        """
         response = await self.get_response(activity_href)
         soup = await self._get_soup(await response.text())
 
@@ -350,14 +368,16 @@ class Strava(AsyncClass):
             stat_section=soup.select_one('ul.inline-stats.section'),
             activity_href=activity_href)
 
+        # Elevation, Calories blocks
         more_stats_section: dict = await self._process_more_stats(
             more_stats_section=soup.select_one('div.section.more-stats')
         )
 
+        # Device, Gear blocks
         device_section = self._process_device_section(
             device_section=soup.select_one('div.section.device-section')
         )
-        # print(device_section)
+
         return ActivityValues(distance=inline_section['distance'],
                               moving_time=inline_section['moving_time'],
                               avg_pace=inline_section['avg_pace'],
@@ -367,19 +387,33 @@ class Strava(AsyncClass):
                               gear=device_section['gear'])
 
     async def _process_activity_cluster(self, activity_cluster) -> Activity:
+        """
+        Processing of the activity cluster, presented on the page of recent club activities.
 
-        # activity_cluster is a bs object: class 'bs4.element.Tag'
+        Cluster contains a lot of useful information. That's why you may have a question:
+        why do we need to get particular values exactly from activity page, and not from this cluster?
+        We have to do it because cluster, mostly, contains outdated information.
+        For example - if user has deleted an activity - it will be shown among clusters,
+        but activity page would not exist, which may lead some problems..
+
+        :param activity_cluster: bs object: class 'bs4.element.Tag'
+        """
+
+        def nickname_converter(raw_nickname: str) -> str:
+            """Validates obtained nickname"""
+            subscriber_index = raw_nickname.find('Subscriber')
+            nick: str = raw_nickname[0:subscriber_index] if subscriber_index != -1 else raw_nickname
+
+            return nick
+
         reg = re.compile('[\n]')
         entry_head = activity_cluster.select_one('div.entry-head')
 
         timestamp = entry_head.select_one('time.timestamp').get('datetime')
         local_dt = self.utc_to_local(timestamp)
-
-        raw_nickname = reg.sub('', entry_head.select_one('a.entry-athlete').text)
-        subscriber_index = raw_nickname.find('Subscriber')
-        nickname = raw_nickname[0:subscriber_index] if subscriber_index != -1 else raw_nickname
-
+        nickname: str = nickname_converter(reg.sub('', entry_head.select_one('a.entry-athlete').text))
         route = bool(activity_cluster.select('a.entry-image.activity-map'))
+
         entry_body = activity_cluster.select_one('h3.entry-title.activity-title').select_one('strong').select_one('a')
 
         activity_href = entry_body.get('href')
