@@ -36,6 +36,32 @@ def bs_object(text):
     return Bs(text, 'html.parser')
 
 
+def write_club_activities_to_file(results: List[Activity], mode: str = 'a'):
+    """
+    Represents activity results in a well-readable view.
+
+    NOTE: Remember that it's a synchronous function!!
+
+    :param results: obtained info about activities
+    :param mode: file write mode: 'w', 'a'
+    """
+    with open('results.txt', mode) as file:
+        for activity in results:
+            out_activity_dict = activity._asdict()
+            for key in out_activity_dict:
+                if key == 'activity_values':
+                    tmp: ActivityValues = out_activity_dict[key]
+                    act_val = tmp._asdict()
+
+                    for act_key in act_val.keys():
+                        file.write(f"{' ' * 5}{act_key}: {act_val[act_key]}\n")
+
+                else:
+                    file.write(f'{key}: {out_activity_dict[key]}\n')
+
+            file.write('\n')
+
+
 class Strava(AsyncClass):
     """Main class for interacting  with www.strava.com website"""
 
@@ -58,8 +84,21 @@ class Strava(AsyncClass):
 
         :return: aiohttp auth request information
         """
+
+        def _csrf_token(text: str) -> str:
+            """
+            Extracts the csrf token from the passed html text.
+
+            :param text: html page code
+            :return: csrf token from page code
+            """
+            tree = html.fromstring(text)
+            tokens: list = tree.xpath('//*[@name="csrf-token"]/@content')
+
+            return tokens[0]
+
         html_text: str = await self._get_html('https://www.strava.com/login')
-        csrf_token: str = self._csrf_token(html_text)
+        csrf_token: str = _csrf_token(html_text)
 
         parameters = {'authenticity_token': csrf_token,
                       'email': self._login,
@@ -103,19 +142,6 @@ class Strava(AsyncClass):
         """Executes blocking task in an executor - another thread"""
         soup_loop = asyncio.get_running_loop()
         return await soup_loop.run_in_executor(None, bs_object, html_text)
-
-    @staticmethod
-    def _csrf_token(text: str) -> str:
-        """
-        Extracts the csrf token from the passed html text.
-
-        :param text: html page code
-        :return: csrf token from page code
-        """
-        tree = html.fromstring(text)
-        tokens: list = tree.xpath('//*[@name="csrf-token"]/@content')
-
-        return tokens[0]
 
     @staticmethod
     def utc_to_local(timestamp: str):
@@ -292,21 +318,28 @@ class Strava(AsyncClass):
 
                         if calories_value != '—':
                             calories: int = self._convert_calories_str_to_int_value(calories_value)
-                        print(calories)
 
         return {'elevation_gain': elevation_gain, 'calories': calories}
 
     @staticmethod
-    async def _process_device_section(device_section):
-        # почитать про await
-        # device: str = '-'
-        # gear: str = '-'
+    def _process_device_section(device_section) -> dict:
+        gear = '-'
+        device: str = '-'
 
-        device = device_section.select_one('div.device').text.strip()
-        gear = device_section.select_one('div.gear').text.strip()
-        # print(device, gear)
+        if device_section:
+            raw_device: str = device_section.select_one('div.device').text.strip()
+            raw_gear: str = device_section.select_one('span.gear-name').text.strip()
 
-        return {'device': device, 'gear': gear}
+            if raw_gear is not None:
+                gear = raw_gear.split('\n')
+
+                if len(gear) == 2:
+                    gear[1] = gear[1][1:(len(gear[1]) - 1)]
+
+            if raw_device is not None:
+                device = raw_device
+
+        return {'device': device, 'gear': tuple(gear)}
 
     async def _process_activity_page(self, activity_href: str) -> ActivityValues:
         response = await self.get_response(activity_href)
@@ -321,20 +354,20 @@ class Strava(AsyncClass):
             more_stats_section=soup.select_one('div.section.more-stats')
         )
 
-        #
-        # device_section = await self._process_device_section(
-        #     device_section=soup.select_one('div.section.device-section')
-        # )
-
+        device_section = self._process_device_section(
+            device_section=soup.select_one('div.section.device-section')
+        )
+        # print(device_section)
         return ActivityValues(distance=inline_section['distance'],
                               moving_time=inline_section['moving_time'],
-                              avg_pace=inline_section['avg_pace'])
-                              # elevation_gain=more_stats_section['elevation_gain'],
-                              # calories=more_stats_section['calories'],
-                              # device=device_section['device'],
-                              # gear=device_section['gear'])
+                              avg_pace=inline_section['avg_pace'],
+                              elevation_gain=more_stats_section['elevation_gain'],
+                              calories=more_stats_section['calories'],
+                              device=device_section['device'],
+                              gear=device_section['gear'])
 
     async def _process_activity_cluster(self, activity_cluster) -> Activity:
+
         # activity_cluster is a bs object: class 'bs4.element.Tag'
         reg = re.compile('[\n]')
         entry_head = activity_cluster.select_one('div.entry-head')
@@ -376,9 +409,7 @@ class Strava(AsyncClass):
 
         results: List[Activity] = await asyncio.gather(*activities_tasks)
 
-        # checker
-        # for activity in results:
-        #     print(activity, '\n')
+        write_club_activities_to_file(results)
 
     def check_connection_setup(self) -> bool:
         return self.connection_established

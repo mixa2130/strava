@@ -42,14 +42,7 @@ async def main() -> NoReturn:
     _password: str = os.getenv('PASSWORD')
 
     async with async_strava.strava_connector(_login, _password) as strava_obj:
-        await strava_obj.get_club_activities(558646)
-        # await strava_obj._process_activity_page('https://www.strava.com/activities/5296674540')
-        # nicknames: list = await get_nicknames(strava_obj)
-        # print(nicknames)
-        # await get_nicknames(strava_obj)
-        # await get_nicknames(strava_obj)
-        # await get_nicknames(strava_obj)
-        # await get_nicknames(strava_obj)
+        await get_nicknames(strava_obj)
 
 
 if __name__ == '__main__':
