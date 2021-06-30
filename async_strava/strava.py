@@ -1,5 +1,7 @@
 """
 Ignoring non run activities
+
+None in results of club_activities represents an error in activity. For example - ActivityNotExist
 """
 import logging
 import re
@@ -47,19 +49,20 @@ def write_club_activities_to_file(results: List[Activity], mode: str = 'a'):
     """
     with open('results.txt', mode) as file:
         for activity in results:
-            out_activity_dict = activity._asdict()
-            for key in out_activity_dict:
-                if key == 'activity_values':
-                    tmp: ActivityValues = out_activity_dict[key]
-                    act_val = tmp._asdict()
+            if activity is not None:
+                out_activity_dict = activity._asdict()
+                for key in out_activity_dict:
+                    if key == 'activity_values':
+                        tmp: ActivityValues = out_activity_dict[key]
+                        act_val = tmp._asdict()
 
-                    for act_key in act_val.keys():
-                        file.write(f"{' ' * 5}{act_key}: {act_val[act_key]}\n")
+                        for act_key in act_val.keys():
+                            file.write(f"{' ' * 5}{act_key}: {act_val[act_key]}\n")
 
-                else:
-                    file.write(f'{key}: {out_activity_dict[key]}\n')
+                    else:
+                        file.write(f'{key}: {out_activity_dict[key]}\n')
 
-            file.write('\n')
+                file.write('\n')
 
 
 class Strava(AsyncClass):
@@ -248,7 +251,6 @@ class Strava(AsyncClass):
 
         :return {distance:, moving_time:, pace:}
         """
-
         if stat_section:
             distance = 0
             moving_time = {'hours': 0, 'minutes': 0, 'seconds': 0}
@@ -420,7 +422,7 @@ class Strava(AsyncClass):
         activity_title = entry_body.text
 
         try:
-            activity_values = await self._process_activity_page('https://www.strava.com/' + activity_href)
+            activity_values = await self._process_activity_page('https://www.strava.com' + activity_href)
             return Activity(route_exist=route, activity_datetime=local_dt,
                             activity_title=activity_title.strip(), user_nickname=nickname,
                             activity_values=activity_values)
