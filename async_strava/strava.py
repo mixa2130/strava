@@ -4,6 +4,7 @@ Ignoring non run activities
 None in results of club_activities represents an error in activity. For example - ActivityNotExist
 """
 import logging
+import multiprocessing
 import re
 import asyncio
 
@@ -17,6 +18,7 @@ import aiohttp
 from bs4 import BeautifulSoup as Bs
 from lxml import html
 from async_class import AsyncClass
+from concurrent.futures import ThreadPoolExecutor
 from .exceptions import StravaSessionFailed, StravaTooManyRequests, NonRunActivity, ActivityNotExist
 from .attributes import Activity, ActivityValues
 
@@ -143,24 +145,9 @@ class Strava(AsyncClass):
     @staticmethod
     async def _get_soup(html_text: str):
         """Executes blocking task in an executor - another thread"""
+        # pool = ThreadPoolExecutor(max_workers=multiprocessing.cpu_count())
         soup_loop = asyncio.get_running_loop()
         return await soup_loop.run_in_executor(None, bs_object, html_text)
-
-    @staticmethod
-    def utc_to_local(timestamp: str):
-        """
-        UTC timestamp converter
-
-        Output instance:
-        datetime.datetime(2021, 5, 8, 18, 38, 29, tzinfo=datetime.timezone(datetime.timedelta(seconds=10800), 'MSK'))
-
-        :param timestamp: utc timestamp in format '0000-00-00 00:00:00 UTC'
-        :type timestamp: str
-
-        :return: local timestamp in datetime format
-        """
-        utc_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S UTC")
-        return utc_dt.replace(tzinfo=timezone.utc).astimezone(tz=None)
 
     async def connection_check(self, request_response) -> bool:
         """
@@ -402,6 +389,21 @@ class Strava(AsyncClass):
         :param activity_cluster: bs object: class 'bs4.element.Tag'
         """
 
+        def utc_to_local(timestamp: str):
+            """
+            UTC timestamp converter
+
+            Output instance:
+            datetime.datetime(2021, 5, 8, 18, 38, 29, tzinfo=datetime.timezone(datetime.timedelta(seconds=10800), 'MSK'))
+
+            :param timestamp: utc timestamp in format '0000-00-00 00:00:00 UTC'
+            :type timestamp: str
+
+            :return: local timestamp in datetime format
+            """
+            utc_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S UTC")
+            return utc_dt.replace(tzinfo=timezone.utc).astimezone(tz=None)
+
         def nickname_converter(raw_nickname: str) -> str:
             """Validates obtained nickname"""
             subscriber_index = raw_nickname.find('Subscriber')
@@ -412,8 +414,8 @@ class Strava(AsyncClass):
         reg = re.compile('[\n]')
         entry_head = activity_cluster.select_one('div.entry-head')
 
-        timestamp = entry_head.select_one('time.timestamp').get('datetime')
-        local_dt = self.utc_to_local(timestamp)
+        activity_timestamp = entry_head.select_one('time.timestamp').get('datetime')
+        local_dt = utc_to_local(activity_timestamp)
         nickname: str = nickname_converter(reg.sub('', entry_head.select_one('a.entry-athlete').text))
         route = bool(activity_cluster.select('a.entry-image.activity-map'))
 
@@ -460,7 +462,7 @@ async def strava_connector(login: str, password: str):
     """
     Context manager for working with instances of Strava class.
 
-    Available Runtmeerror: generator didn't yield
+    Available RuntimeError: generator didn't yield
     :param login: strava login
     :param password: strava password
 
