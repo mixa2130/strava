@@ -36,3 +36,15 @@ class ActivityNotExist(Exception):
 
     def __repr__(self):
         return f'Activity {self.uri} has been deleted'
+
+
+class ParserError(Exception):
+    """Failure during web page parsing: Programmer made a mistake"""
+
+    def __init__(self, activity_uri: str, exception_desc: str):
+        self.uri = activity_uri
+        self.exc = exception_desc
+
+    def __repr__(self):
+        return f'{self.exc} during parsing {self.uri}. ' \
+               f'Please create an issue in https://github.com/mixa2130/strava/issues'

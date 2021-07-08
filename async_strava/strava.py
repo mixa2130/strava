@@ -19,7 +19,7 @@ from bs4 import BeautifulSoup as Bs
 from lxml import html
 from async_class import AsyncClass
 from concurrent.futures import ThreadPoolExecutor
-from .exceptions import StravaSessionFailed, StravaTooManyRequests, NonRunActivity, ActivityNotExist
+from .exceptions import StravaSessionFailed, StravaTooManyRequests, NonRunActivity, ActivityNotExist, ParserError
 from .attributes import Activity, ActivityValues
 
 # Configure logging
@@ -29,7 +29,7 @@ LOGGER.setLevel(logging.DEBUG)
 handler = logging.StreamHandler(stdout)
 handler.setLevel(logging.DEBUG)
 
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(filename)s.%(funcName)s - %(message)s',
                               datefmt='%Y-%m-%d %H:%M:%S')
 
 handler.setFormatter(formatter)
@@ -229,7 +229,7 @@ class Strava(AsyncClass):
         return title[(title.find('| ') + 2):]
 
     @staticmethod
-    async def _process_inline_section(stat_section, activity_href: str) -> dict:
+    def _process_inline_section(stat_section, activity_href: str) -> dict:
         """
         Processes activity page inline-stats section.
 
@@ -246,49 +246,55 @@ class Strava(AsyncClass):
             moving_time = {'hours': 0, 'minutes': 0, 'seconds': 0}
             pace: dict = {'min_km': 0, 'sec_km': 0}
 
-            activity_details = stat_section.select('li')
-            for item in activity_details:
-                tmp = item.select_one('div.label').text
+            try:
+                activity_details = stat_section.select('li')
+                for item in activity_details:
+                    tmp = item.select_one('div.label').text
 
-                cluster_type = tmp.strip()
-                cluster = item.select_one('strong').text
+                    cluster_type = tmp.strip()
+                    cluster = item.select_one('strong').text
 
-                if cluster_type == 'Distance':
-                    divided_distance = re.findall(pattern, cluster)
-                    distance = float(''.join(divided_distance))
+                    if cluster_type == 'Distance':
+                        divided_distance = re.findall(pattern, cluster)
+                        distance = float(''.join(divided_distance))
 
-                if cluster_type == 'Moving Time':
-                    time_values: List[str] = cluster.split(':')
+                    if cluster_type == 'Moving Time':
+                        time_values: List[str] = cluster.split(':')
 
-                    if len(time_values) == 3:
-                        for time_index, key in enumerate(moving_time.keys()):
-                            moving_time[key] = int(time_values[time_index])
-                    else:
-                        moving_time['minutes'] = int(time_values[0])
-                        moving_time['seconds'] = int(time_values[1])
+                        if len(time_values) == 3:
+                            for time_index, key in enumerate(moving_time.keys()):
+                                moving_time[key] = int(time_values[time_index])
+                        else:
+                            moving_time['minutes'] = int(time_values[0])
+                            moving_time['seconds'] = int(time_values[1])
 
-                if cluster_type == 'Pace':
-                    pace_values = cluster.split(':')  # ['7', '18/km']
-                    for index, value in enumerate(pace_values):
-                        str_value = re.search(r'\d+', value)
-                        pace_values[index]: int = int(str_value.group(0)) if str_value is not None else 0
+                    if cluster_type == 'Pace':
+                        pace_values = cluster.split(':')  # ['7', '18/km']
+                        for index, value in enumerate(pace_values):
+                            str_value = re.search(r'\d+', value)
+                            pace_values[index]: int = int(str_value.group(0)) if str_value is not None else 0
 
-                    if len(pace_values) == 1:
-                        pace['sec_km'] = pace_values[0]
-                    else:
-                        pace['min_km'] = pace_values[0]
-                        pace['sec_km'] = pace_values[1]
+                        if len(pace_values) == 1:
+                            pace['sec_km'] = pace_values[0]
+                        else:
+                            pace['min_km'] = pace_values[0]
+                            pace['sec_km'] = pace_values[1]
+
+            except Exception as exc:
+                LOGGER.error(repr(exc))
+                raise ParserError(activity_href, repr(exc))
 
             if (pace['min_km'] == 0 and pace['sec_km'] == 0) or distance == 0:
                 raise NonRunActivity(activity_href)
 
             return {'distance': distance, 'moving_time': moving_time, 'avg_pace': pace}
 
-        # Activity might be deleted recently. In this case strava redirects to the profile page
-        raise ActivityNotExist(activity_href)
+        else:
+            # Activity might be deleted recently. In this case strava redirects to the profile page
+            raise ActivityNotExist(activity_href)
 
     @staticmethod
-    async def _process_more_stats(more_stats_section) -> dict:
+    def _process_more_stats(more_stats_section, activity_href) -> dict:
         """
         Processes activity page more-stats section.
 
@@ -299,54 +305,64 @@ class Strava(AsyncClass):
         elevation_gain: int = 0
         calories: int = 0
 
-        if more_stats_section:
-            rows = more_stats_section.select('div.row')
+        try:
+            if more_stats_section:
+                rows = more_stats_section.select('div.row')
 
-            for row in rows:
-                values = row.select('div.spans3')
-                descriptions = row.select('div.spans5')
+                for row in rows:
+                    values = row.select('div.spans3')
+                    descriptions = row.select('div.spans5')
 
-                for index, desc in enumerate(descriptions):
-                    if desc.text.strip() == 'Elevation':
-                        # We get value in format '129m\n' or '\n129m\n'
-                        elevation = re.search('[0-9]+', values[index].text)
+                    for index, desc in enumerate(descriptions):
+                        if desc.text.strip() == 'Elevation':
+                            # We get value in format '129m\n' or '\n129m\n'
+                            elevation = re.search('[0-9]+', values[index].text)
 
-                        if elevation is not None:
-                            elevation_gain = int(elevation.group())
+                            if elevation is not None:
+                                elevation_gain = int(elevation.group())
 
-                    if desc.text.strip() == 'Calories':
-                        calories_value: str = values[index].text.strip()
+                        if desc.text.strip() == 'Calories':
+                            calories_value: str = values[index].text.strip()
 
-                        # We can get calories in such views: '-' <=> 0, '684', '1,099' <=> 1099
-                        if calories_value != '—':
-                            calories: int = int(re.sub(r',', r'', calories_value))
+                            # We can get calories in such views: '-' <=> 0, '684', '1,099' <=> 1099
+                            if calories_value != '—':
+                                calories: int = int(re.sub(r',', r'', calories_value))
+        except Exception as exc:
+            LOGGER.error(repr(exc))
+            raise ParserError(activity_href, repr(exc))
 
         return {'elevation_gain': elevation_gain, 'calories': calories}
 
     @staticmethod
-    def _process_device_section(device_section) -> dict:
+    def _process_device_section(device_cluster, activity_href) -> dict:
         """
         Processes activity page device section.
 
-        :param device_section: device section html cluster
+        :param device_cluster: device section html cluster
 
         :return: {device:, gear:}
         """
         gear = '-'
-        device: str = '-'
+        device = '-'
 
-        if device_section:
-            raw_device: str = device_section.select_one('div.device').text.strip()
-            raw_gear: str = device_section.select_one('span.gear-name').text.strip()
+        try:
+            if device_cluster:
+                device_section = device_cluster.select_one('div.device')
+                gear_section = device_cluster.select_one('span.gear-name')
 
-            if raw_gear is not None:
-                gear = raw_gear.split('\n')
+                if gear_section is not None:
+                    raw_gear: str = gear_section.text.strip()  # adidas Pulseboost HD\n(2,441.7 km)
 
-                if len(gear) == 2:
-                    gear[1] = gear[1][1:(len(gear[1]) - 1)]
+                    gear = raw_gear.split('\n')
+                    if len(gear) == 2 and len(gear[1]) > 2:
+                        gear[1] = gear[1][1:len(gear[1]) - 1]
 
-            if raw_device is not None:
-                device = raw_device
+                if device_section is not None:
+                    device: str = device_section.text.strip()
+
+        except Exception as exc:
+            LOGGER.error(repr(exc))
+            raise ParserError(activity_href, repr(exc))
 
         return {'device': device, 'gear': tuple(gear)}
 
@@ -363,19 +379,19 @@ class Strava(AsyncClass):
         soup = await self._get_soup(await response.text())
 
         # Distance, Moving time, Pace block
-        inline_section: dict = await self._process_inline_section(
+        inline_section: dict = self._process_inline_section(
             stat_section=soup.select_one('ul.inline-stats.section'),
             activity_href=activity_href)
 
         # Elevation, Calories blocks
-        more_stats_section: dict = await self._process_more_stats(
-            more_stats_section=soup.select_one('div.section.more-stats')
-        )
+        more_stats_section: dict = self._process_more_stats(
+            more_stats_section=soup.select_one('div.section.more-stats'),
+            activity_href=activity_href)
 
         # Device, Gear blocks
         device_section = self._process_device_section(
-            device_section=soup.select_one('div.section.device-section')
-        )
+            device_cluster=soup.select_one('div.section.device-section'),
+            activity_href=activity_href)
 
         return ActivityValues(distance=inline_section['distance'],
                               moving_time=inline_section['moving_time'],
@@ -443,6 +459,9 @@ class Strava(AsyncClass):
             LOGGER.info(repr(exc))
 
         except ActivityNotExist as exc:
+            LOGGER.info(repr(exc))
+
+        except ParserError as exc:
             LOGGER.info(repr(exc))
 
     async def _get_tasks(self, page_url: str, tasks: list) -> int:
