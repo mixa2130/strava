@@ -460,15 +460,17 @@ class Strava(AsyncClass):
         return int(before)
 
     async def get_club_activities(self, club_id: int):
-        club_activities_page_url = 'https://www.strava.com/clubs/%s/recent_activity' % club_id
+        club_activities_page_url: str = f'https://www.strava.com/clubs/{str(club_id)}/feed?feed_type=club'
 
+        # Start pages processing
         activities_tasks = []
-        before = 1
+        before: int = await self._get_tasks(club_activities_page_url, activities_tasks)
+
         while before != 0:
-            before: int = await self._get_tasks(club_activities_page_url, activities_tasks)
-            club_activities_page_url = f'https://www.strava.com/clubs/{club_id}/feed?' \
-                                       f'feed_type=club&before={before}&cursor={float(before)}'
-            print(before)
+            before: int = await self._get_tasks(
+                club_activities_page_url + f'&before={before}&cursor={float(before)}',
+                activities_tasks)
+
         results: List[Activity] = await asyncio.gather(*activities_tasks)
         write_club_activities_to_file(results)
 
