@@ -240,6 +240,8 @@ class Strava(AsyncClass):
         :return {distance:, moving_time:, pace:}
         """
         if stat_section:
+            pattern = re.compile(r'[\d.]')
+
             distance = 0
             moving_time = {'hours': 0, 'minutes': 0, 'seconds': 0}
             pace: dict = {'min_km': 0, 'sec_km': 0}
@@ -252,7 +254,8 @@ class Strava(AsyncClass):
                 cluster = item.select_one('strong').text
 
                 if cluster_type == 'Distance':
-                    distance = float(cluster[0:cluster.find('km')])
+                    divided_distance = re.findall(pattern, cluster)
+                    distance = float(''.join(divided_distance))
 
                 if cluster_type == 'Moving Time':
                     time_values: List[str] = cluster.split(':')
@@ -265,10 +268,16 @@ class Strava(AsyncClass):
                         moving_time['seconds'] = int(time_values[1])
 
                 if cluster_type == 'Pace':
-                    pace_values: List[str] = cluster.split(':')  # ['7', '18/km']
+                    pace_values = cluster.split(':')  # ['7', '18/km']
+                    for index, value in enumerate(pace_values):
+                        str_value = re.search(r'\d+', value)
+                        pace_values[index]: int = int(str_value.group(0)) if str_value is not None else 0
 
-                    sec_km: str = pace_values[1][:pace_values[1].find('/')]
-                    pace: dict = {'min_km': int(pace_values[0]), 'sec_km': int(sec_km)}
+                    if len(pace_values) == 1:
+                        pace['sec_km'] = pace_values[0]
+                    else:
+                        pace['min_km'] = pace_values[0]
+                        pace['sec_km'] = pace_values[1]
 
             if (pace['min_km'] == 0 and pace['sec_km'] == 0) or distance == 0:
                 raise NonRunActivity(activity_href)
