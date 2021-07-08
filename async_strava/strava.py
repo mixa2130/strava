@@ -436,18 +436,40 @@ class Strava(AsyncClass):
         except ActivityNotExist as exc:
             LOGGER.info(repr(exc))
 
-    async def get_club_activities(self, club_id: int):
-        club_activities_page_url = 'https://www.strava.com/clubs/%s/recent_activity' % club_id
-        response = await self.get_response(club_activities_page_url)
+    async def _get_tasks(self, page_url: str, tasks: list) -> int:
+        """
+
+        :param page_url:
+        :param tasks:
+        :return: 0 - no more pages
+                else - before
+        """
+        response = await self.get_response(page_url)
         soup = await self._get_soup(await response.text())
 
         single_activities_blocks = soup.select('div.activity.entity-details.feed-entry')
-        # As for single, as for group activities
-        activities_tasks = [asyncio.create_task(self._process_activity_cluster(cluster)) for cluster in
-                            single_activities_blocks]
 
+        if len(single_activities_blocks) == 0:
+            # No more pages
+            return 0
+
+        for cluster in single_activities_blocks:
+            tasks.append(asyncio.create_task(self._process_activity_cluster(cluster)))
+
+        before: str = single_activities_blocks[len(single_activities_blocks) - 1].get('data-updated-at')
+        return int(before)
+
+    async def get_club_activities(self, club_id: int):
+        club_activities_page_url = 'https://www.strava.com/clubs/%s/recent_activity' % club_id
+
+        activities_tasks = []
+        before = 1
+        while before != 0:
+            before: int = await self._get_tasks(club_activities_page_url, activities_tasks)
+            club_activities_page_url = f'https://www.strava.com/clubs/{club_id}/feed?' \
+                                       f'feed_type=club&before={before}&cursor={float(before)}'
+            print(before)
         results: List[Activity] = await asyncio.gather(*activities_tasks)
-
         write_club_activities_to_file(results)
 
     def check_connection_setup(self) -> bool:
