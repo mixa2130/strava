@@ -4,7 +4,6 @@ Ignoring non run activities
 None in results of club_activities represents an error in activity. For example - ActivityNotExist
 """
 import logging
-import multiprocessing
 import re
 import asyncio
 
@@ -18,8 +17,8 @@ import aiohttp
 from bs4 import BeautifulSoup as Bs
 from lxml import html
 from async_class import AsyncClass
-from concurrent.futures import ThreadPoolExecutor
-from .exceptions import StravaSessionFailed, StravaTooManyRequests, NonRunActivity, ActivityNotExist, ParserError
+from .exceptions import StravaSessionFailed, ServerError, StravaTooManyRequests, NonRunActivity, ActivityNotExist, \
+    ParserError
 from .attributes import Activity, ActivityValues
 
 # Configure logging
@@ -128,8 +127,8 @@ class Strava(AsyncClass):
             connection = await self.connection_check(session_response)
 
             if not connection:
-                await asyncio.sleep(7)
                 LOGGER.error('%i of %i attempt to connect has failed', check_counter + 1, allowed_attempts)
+                await asyncio.sleep(15)
             else:
                 LOGGER.info('Session established')
                 return 0
@@ -145,7 +144,6 @@ class Strava(AsyncClass):
     @staticmethod
     async def _get_soup(html_text: str):
         """Executes blocking task in an executor - another thread"""
-        # pool = ThreadPoolExecutor(max_workers=multiprocessing.cpu_count())
         soup_loop = asyncio.get_running_loop()
         return await soup_loop.run_in_executor(None, bs_object, html_text)
 
@@ -177,14 +175,29 @@ class Strava(AsyncClass):
         In my mind - this function has to proceed and return "get" request response.
         It has to proceed such errors, as 429, ServerDisconnectedError, ..
 
-
         :param uri: requested page
 
         :raise StravaSessionFailed: if unable to reconnect or update strava session
         :return: request result obj
         """
         try:
-            return await self._session.get(uri)
+            response = await self._session.get(uri)
+            status_code = response.status
+
+            if status_code != 200:
+
+                if status_code == 429:
+                    # This error will cancel connection.
+                    # Therefore, within the framework of this class, it is not processed
+                    raise StravaTooManyRequests
+
+                if status_code - 400 >= 0:
+                    # This error will cancel connection.
+                    # Therefore, within the framework of this class, it is not processed
+                    raise ServerError(status_code)
+
+            return response
+
         except aiohttp.ServerDisconnectedError:
             LOGGER.info('ServerDisconnectedError in get_strava_nickname_from_uri %s', uri)
 
@@ -206,6 +219,7 @@ class Strava(AsyncClass):
 
     async def get_strava_nickname_from_uri(self, profile_uri: str) -> str:
         """
+        REFORMAT
         Gets nickname from strava user profile page.
         If page not found - def will return '' - an empty str.
 
@@ -239,59 +253,54 @@ class Strava(AsyncClass):
         :raise ActivityNotExist: Activity has been deleted
         :return {distance:, moving_time:, pace:}
         """
-        if stat_section:
-            pattern = re.compile(r'[\d.]')
+        distance = 0
+        moving_time = {'hours': 0, 'minutes': 0, 'seconds': 0}
+        pace: dict = {'min_km': 0, 'sec_km': 0}
 
-            distance = 0
-            moving_time = {'hours': 0, 'minutes': 0, 'seconds': 0}
-            pace: dict = {'min_km': 0, 'sec_km': 0}
+        try:
+            activity_details = stat_section.select('li')
+            for item in activity_details:
+                tmp = item.select_one('div.label').text
 
-            try:
-                activity_details = stat_section.select('li')
-                for item in activity_details:
-                    tmp = item.select_one('div.label').text
+                cluster_type = tmp.strip()
+                cluster = item.select_one('strong').text
 
-                    cluster_type = tmp.strip()
-                    cluster = item.select_one('strong').text
+                if cluster_type == 'Distance':
+                    divided_distance = re.findall(r'[\d.]', cluster)
+                    distance = float(''.join(divided_distance))
 
-                    if cluster_type == 'Distance':
-                        divided_distance = re.findall(pattern, cluster)
-                        distance = float(''.join(divided_distance))
+                if cluster_type == 'Moving Time':
+                    time_values: List[str] = cluster.split(':')
 
-                    if cluster_type == 'Moving Time':
-                        time_values: List[str] = cluster.split(':')
+                    if len(time_values) == 3:
+                        for time_index, key in enumerate(moving_time.keys()):
+                            moving_time[key] = int(time_values[time_index])
+                    else:
+                        moving_time['minutes'] = int(time_values[0])
+                        moving_time['seconds'] = int(time_values[1])
 
-                        if len(time_values) == 3:
-                            for time_index, key in enumerate(moving_time.keys()):
-                                moving_time[key] = int(time_values[time_index])
-                        else:
-                            moving_time['minutes'] = int(time_values[0])
-                            moving_time['seconds'] = int(time_values[1])
+                if cluster_type == 'Pace':
+                    pace_values = cluster.split(':')  # ['7', '18/km'] ['7s/km']
+                    for index, value in enumerate(pace_values):
+                        str_value = re.search(r'\d+', value)
+                        pace_values[index]: int = int(str_value.group(0)) if str_value is not None else 0
 
-                    if cluster_type == 'Pace':
-                        pace_values = cluster.split(':')  # ['7', '18/km']
-                        for index, value in enumerate(pace_values):
-                            str_value = re.search(r'\d+', value)
-                            pace_values[index]: int = int(str_value.group(0)) if str_value is not None else 0
+                    if len(pace_values) == 1:
+                        pace['sec_km'] = pace_values[0]
+                    else:
+                        pace['min_km'] = pace_values[0]
+                        pace['sec_km'] = pace_values[1]
 
-                        if len(pace_values) == 1:
-                            pace['sec_km'] = pace_values[0]
-                        else:
-                            pace['min_km'] = pace_values[0]
-                            pace['sec_km'] = pace_values[1]
+        except Exception as exc:
+            LOGGER.error(repr(exc))
+            raise ParserError(activity_href, repr(exc))
 
-            except Exception as exc:
-                LOGGER.error(repr(exc))
-                raise ParserError(activity_href, repr(exc))
+        if moving_time['minutes'] == moving_time['seconds'] == moving_time['hours'] == 0 or \
+                distance == 0 or pace['min_km'] == pace['sec_km'] == 0:
+            # Run activity can't exist without one of this params
+            raise NonRunActivity(activity_href)
 
-            if (pace['min_km'] == 0 and pace['sec_km'] == 0) or distance == 0:
-                raise NonRunActivity(activity_href)
-
-            return {'distance': distance, 'moving_time': moving_time, 'avg_pace': pace}
-
-        else:
-            # Activity might be deleted recently. In this case strava redirects to the profile page
-            raise ActivityNotExist(activity_href)
+        return {'distance': distance, 'moving_time': moving_time, 'avg_pace': pace}
 
     @staticmethod
     def _process_more_stats(more_stats_section, activity_href) -> dict:
@@ -355,6 +364,7 @@ class Strava(AsyncClass):
 
                     gear = raw_gear.split('\n')
                     if len(gear) == 2 and len(gear[1]) > 2:
+                        # remove brackets from gear mileage
                         gear[1] = gear[1][1:len(gear[1]) - 1]
 
                 if device_section is not None:
@@ -377,6 +387,13 @@ class Strava(AsyncClass):
         """
         response = await self.get_response(activity_href)
         soup = await self._get_soup(await response.text())
+
+        # Activity type
+        title_block = soup.select_one('span.title')
+        if title_block is None:
+            # Server errors have been proceeded previously in get_response
+            # If there is no activity title - then we've been redirected to the dashboard
+            raise ActivityNotExist(activity_href)
 
         # Distance, Moving time, Pace block
         inline_section: dict = self._process_inline_section(
@@ -509,6 +526,13 @@ class Strava(AsyncClass):
         await self._session.close()
 
 
+async def shutdown():
+    tasks = [task for task in asyncio.Task.all_tasks() if task is not
+             asyncio.tasks.Task.current_task()]
+    list(map(lambda task: task.cancel(), tasks))
+    LOGGER.info('All tasks are finished')
+
+
 @asynccontextmanager
 async def strava_connector(login: str, password: str):
     """
@@ -533,4 +557,5 @@ async def strava_connector(login: str, password: str):
 
     finally:
         await small_strava.close()
+        await shutdown()
         LOGGER.info('Session closed')

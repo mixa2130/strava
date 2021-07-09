@@ -15,6 +15,16 @@ class StravaTooManyRequests(Exception):
         return "Http 429 status code - too many requests per time unit"
 
 
+class ServerError(Exception):
+    """Strava server error"""
+
+    def __init__(self, status_code):
+        self.code = status_code
+
+    def __repr__(self):
+        return f"{self.code} - Server error"
+
+
 class NonRunActivity(Exception):
     """Non-running activity, such as cardio"""
 
