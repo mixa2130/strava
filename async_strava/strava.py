@@ -269,7 +269,7 @@ class Strava(AsyncClass):
                     divided_distance = re.findall(r'[\d.]', cluster)
                     distance = float(''.join(divided_distance))
 
-                if cluster_type == 'Moving Time':
+                if cluster_type == 'Moving Time' or cluster_type == 'Elapsed Time':
                     time_values: List[str] = cluster.split(':')
 
                     if len(time_values) == 3:
