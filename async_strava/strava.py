@@ -4,7 +4,6 @@ Ignoring non run activities
 None in results of club_activities represents an error in activity. For example - ActivityNotExist
 """
 import logging
-import multiprocessing
 import re
 import asyncio
 
@@ -18,8 +17,8 @@ import aiohttp
 from bs4 import BeautifulSoup as Bs
 from lxml import html
 from async_class import AsyncClass
-from concurrent.futures import ThreadPoolExecutor
-from .exceptions import StravaSessionFailed, StravaTooManyRequests, NonRunActivity, ActivityNotExist
+from .exceptions import StravaSessionFailed, ServerError, StravaTooManyRequests, NonRunActivity, ActivityNotExist, \
+    ParserError
 from .attributes import Activity, ActivityValues
 
 # Configure logging
@@ -29,7 +28,7 @@ LOGGER.setLevel(logging.DEBUG)
 handler = logging.StreamHandler(stdout)
 handler.setLevel(logging.DEBUG)
 
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(filename)s.%(funcName)s - %(message)s',
                               datefmt='%Y-%m-%d %H:%M:%S')
 
 handler.setFormatter(formatter)
@@ -128,8 +127,8 @@ class Strava(AsyncClass):
             connection = await self.connection_check(session_response)
 
             if not connection:
-                await asyncio.sleep(7)
                 LOGGER.error('%i of %i attempt to connect has failed', check_counter + 1, allowed_attempts)
+                await asyncio.sleep(15)
             else:
                 LOGGER.info('Session established')
                 return 0
@@ -145,7 +144,6 @@ class Strava(AsyncClass):
     @staticmethod
     async def _get_soup(html_text: str):
         """Executes blocking task in an executor - another thread"""
-        # pool = ThreadPoolExecutor(max_workers=multiprocessing.cpu_count())
         soup_loop = asyncio.get_running_loop()
         return await soup_loop.run_in_executor(None, bs_object, html_text)
 
@@ -177,14 +175,29 @@ class Strava(AsyncClass):
         In my mind - this function has to proceed and return "get" request response.
         It has to proceed such errors, as 429, ServerDisconnectedError, ..
 
-
         :param uri: requested page
 
         :raise StravaSessionFailed: if unable to reconnect or update strava session
         :return: request result obj
         """
         try:
-            return await self._session.get(uri)
+            response = await self._session.get(uri)
+            status_code = response.status
+
+            if status_code != 200:
+
+                if status_code == 429:
+                    # This error will cancel connection.
+                    # Therefore, within the framework of this class, it is not processed
+                    raise StravaTooManyRequests
+
+                if status_code - 400 >= 0:
+                    # This error will cancel connection.
+                    # Therefore, within the framework of this class, it is not processed
+                    raise ServerError(status_code)
+
+            return response
+
         except aiohttp.ServerDisconnectedError:
             LOGGER.info('ServerDisconnectedError in get_strava_nickname_from_uri %s', uri)
 
@@ -206,6 +219,7 @@ class Strava(AsyncClass):
 
     async def get_strava_nickname_from_uri(self, profile_uri: str) -> str:
         """
+        REFORMAT
         Gets nickname from strava user profile page.
         If page not found - def will return '' - an empty str.
 
@@ -229,7 +243,7 @@ class Strava(AsyncClass):
         return title[(title.find('| ') + 2):]
 
     @staticmethod
-    async def _process_inline_section(stat_section, activity_href: str) -> dict:
+    def _process_inline_section(stat_section, activity_href: str) -> dict:
         """
         Processes activity page inline-stats section.
 
@@ -239,11 +253,11 @@ class Strava(AsyncClass):
         :raise ActivityNotExist: Activity has been deleted
         :return {distance:, moving_time:, pace:}
         """
-        if stat_section:
-            distance = 0
-            moving_time = {'hours': 0, 'minutes': 0, 'seconds': 0}
-            pace: dict = {'min_km': 0, 'sec_km': 0}
+        distance = 0
+        moving_time = {'hours': 0, 'minutes': 0, 'seconds': 0}
+        pace: dict = {'min_km': 0, 'sec_km': 0}
 
+        try:
             activity_details = stat_section.select('li')
             for item in activity_details:
                 tmp = item.select_one('div.label').text
@@ -252,9 +266,10 @@ class Strava(AsyncClass):
                 cluster = item.select_one('strong').text
 
                 if cluster_type == 'Distance':
-                    distance = float(cluster[0:cluster.find('km')])
+                    divided_distance = re.findall(r'[\d.]', cluster)
+                    distance = float(''.join(divided_distance))
 
-                if cluster_type == 'Moving Time':
+                if cluster_type == 'Moving Time' or cluster_type == 'Elapsed Time':
                     time_values: List[str] = cluster.split(':')
 
                     if len(time_values) == 3:
@@ -265,21 +280,30 @@ class Strava(AsyncClass):
                         moving_time['seconds'] = int(time_values[1])
 
                 if cluster_type == 'Pace':
-                    pace_values: List[str] = cluster.split(':')  # ['7', '18/km']
+                    pace_values = cluster.split(':')  # ['7', '18/km'] ['7s/km']
+                    for index, value in enumerate(pace_values):
+                        str_value = re.search(r'\d+', value)
+                        pace_values[index]: int = int(str_value.group(0)) if str_value is not None else 0
 
-                    sec_km: str = pace_values[1][:pace_values[1].find('/')]
-                    pace: dict = {'min_km': int(pace_values[0]), 'sec_km': int(sec_km)}
+                    if len(pace_values) == 1:
+                        pace['sec_km'] = pace_values[0]
+                    else:
+                        pace['min_km'] = pace_values[0]
+                        pace['sec_km'] = pace_values[1]
 
-            if (pace['min_km'] == 0 and pace['sec_km'] == 0) or distance == 0:
-                raise NonRunActivity(activity_href)
+        except Exception as exc:
+            LOGGER.error(repr(exc))
+            raise ParserError(activity_href, repr(exc))
 
-            return {'distance': distance, 'moving_time': moving_time, 'avg_pace': pace}
+        if moving_time['minutes'] == moving_time['seconds'] == moving_time['hours'] == 0 or \
+                distance == 0 or pace['min_km'] == pace['sec_km'] == 0:
+            # Run activity can't exist without one of this params
+            raise NonRunActivity(activity_href)
 
-        # Activity might be deleted recently. In this case strava redirects to the profile page
-        raise ActivityNotExist(activity_href)
+        return {'distance': distance, 'moving_time': moving_time, 'avg_pace': pace}
 
     @staticmethod
-    async def _process_more_stats(more_stats_section) -> dict:
+    def _process_more_stats(more_stats_section, activity_href) -> dict:
         """
         Processes activity page more-stats section.
 
@@ -290,54 +314,65 @@ class Strava(AsyncClass):
         elevation_gain: int = 0
         calories: int = 0
 
-        if more_stats_section:
-            rows = more_stats_section.select('div.row')
+        try:
+            if more_stats_section:
+                rows = more_stats_section.select('div.row')
 
-            for row in rows:
-                values = row.select('div.spans3')
-                descriptions = row.select('div.spans5')
+                for row in rows:
+                    values = row.select('div.spans3')
+                    descriptions = row.select('div.spans5')
 
-                for index, desc in enumerate(descriptions):
-                    if desc.text.strip() == 'Elevation':
-                        # We get value in format '129m\n' or '\n129m\n'
-                        elevation = re.search('[0-9]+', values[index].text)
+                    for index, desc in enumerate(descriptions):
+                        if desc.text.strip() == 'Elevation':
+                            # We get value in format '129m\n' or '\n129m\n'
+                            elevation = re.search('[0-9]+', values[index].text)
 
-                        if elevation is not None:
-                            elevation_gain = int(elevation.group())
+                            if elevation is not None:
+                                elevation_gain = int(elevation.group())
 
-                    if desc.text.strip() == 'Calories':
-                        calories_value: str = values[index].text.strip()
+                        if desc.text.strip() == 'Calories':
+                            calories_value: str = values[index].text.strip()
 
-                        # We can get calories in such views: '-' <=> 0, '684', '1,099' <=> 1099
-                        if calories_value != '—':
-                            calories: int = int(re.sub(r',', r'', calories_value))
+                            # We can get calories in such views: '-' <=> 0, '684', '1,099' <=> 1099
+                            if calories_value != '—':
+                                calories: int = int(re.sub(r',', r'', calories_value))
+        except Exception as exc:
+            LOGGER.error(repr(exc))
+            raise ParserError(activity_href, repr(exc))
 
         return {'elevation_gain': elevation_gain, 'calories': calories}
 
     @staticmethod
-    def _process_device_section(device_section) -> dict:
+    def _process_device_section(device_cluster, activity_href) -> dict:
         """
         Processes activity page device section.
 
-        :param device_section: device section html cluster
+        :param device_cluster: device section html cluster
 
         :return: {device:, gear:}
         """
         gear = '-'
-        device: str = '-'
+        device = '-'
 
-        if device_section:
-            raw_device: str = device_section.select_one('div.device').text.strip()
-            raw_gear: str = device_section.select_one('span.gear-name').text.strip()
+        try:
+            if device_cluster:
+                device_section = device_cluster.select_one('div.device')
+                gear_section = device_cluster.select_one('span.gear-name')
 
-            if raw_gear is not None:
-                gear = raw_gear.split('\n')
+                if gear_section is not None:
+                    raw_gear: str = gear_section.text.strip()  # adidas Pulseboost HD\n(2,441.7 km)
 
-                if len(gear) == 2:
-                    gear[1] = gear[1][1:(len(gear[1]) - 1)]
+                    gear = raw_gear.split('\n')
+                    if len(gear) == 2 and len(gear[1]) > 2:
+                        # remove brackets from gear mileage
+                        gear[1] = gear[1][1:len(gear[1]) - 1]
 
-            if raw_device is not None:
-                device = raw_device
+                if device_section is not None:
+                    device: str = device_section.text.strip()
+
+        except Exception as exc:
+            LOGGER.error(repr(exc))
+            raise ParserError(activity_href, repr(exc))
 
         return {'device': device, 'gear': tuple(gear)}
 
@@ -353,20 +388,27 @@ class Strava(AsyncClass):
         response = await self.get_response(activity_href)
         soup = await self._get_soup(await response.text())
 
+        # Activity type
+        title_block = soup.select_one('span.title')
+        if title_block is None:
+            # Server errors have been proceeded previously in get_response
+            # If there is no activity title - then we've been redirected to the dashboard
+            raise ActivityNotExist(activity_href)
+
         # Distance, Moving time, Pace block
-        inline_section: dict = await self._process_inline_section(
+        inline_section: dict = self._process_inline_section(
             stat_section=soup.select_one('ul.inline-stats.section'),
             activity_href=activity_href)
 
         # Elevation, Calories blocks
-        more_stats_section: dict = await self._process_more_stats(
-            more_stats_section=soup.select_one('div.section.more-stats')
-        )
+        more_stats_section: dict = self._process_more_stats(
+            more_stats_section=soup.select_one('div.section.more-stats'),
+            activity_href=activity_href)
 
         # Device, Gear blocks
         device_section = self._process_device_section(
-            device_section=soup.select_one('div.section.device-section')
-        )
+            device_cluster=soup.select_one('div.section.device-section'),
+            activity_href=activity_href)
 
         return ActivityValues(distance=inline_section['distance'],
                               moving_time=inline_section['moving_time'],
@@ -436,18 +478,45 @@ class Strava(AsyncClass):
         except ActivityNotExist as exc:
             LOGGER.info(repr(exc))
 
-    async def get_club_activities(self, club_id: int):
-        club_activities_page_url = 'https://www.strava.com/clubs/%s/recent_activity' % club_id
-        response = await self.get_response(club_activities_page_url)
+        except ParserError as exc:
+            LOGGER.info(repr(exc))
+
+    async def _get_tasks(self, page_url: str, tasks: list) -> int:
+        """
+
+        :param page_url:
+        :param tasks:
+        :return: 0 - no more pages
+                else - before
+        """
+        response = await self.get_response(page_url)
         soup = await self._get_soup(await response.text())
 
         single_activities_blocks = soup.select('div.activity.entity-details.feed-entry')
-        # As for single, as for group activities
-        activities_tasks = [asyncio.create_task(self._process_activity_cluster(cluster)) for cluster in
-                            single_activities_blocks]
+
+        if len(single_activities_blocks) == 0:
+            # No more pages
+            return 0
+
+        for cluster in single_activities_blocks:
+            tasks.append(asyncio.create_task(self._process_activity_cluster(cluster)))
+
+        before: str = single_activities_blocks[len(single_activities_blocks) - 1].get('data-updated-at')
+        return int(before)
+
+    async def get_club_activities(self, club_id: int):
+        club_activities_page_url: str = f'https://www.strava.com/clubs/{str(club_id)}/feed?feed_type=club'
+
+        # Start pages processing
+        activities_tasks = []
+        before: int = await self._get_tasks(club_activities_page_url, activities_tasks)
+
+        while before != 0:
+            before: int = await self._get_tasks(
+                club_activities_page_url + f'&before={before}&cursor={float(before)}',
+                activities_tasks)
 
         results: List[Activity] = await asyncio.gather(*activities_tasks)
-
         write_club_activities_to_file(results)
 
     def check_connection_setup(self) -> bool:
@@ -455,6 +524,13 @@ class Strava(AsyncClass):
 
     async def __adel__(self) -> None:
         await self._session.close()
+
+
+async def shutdown():
+    tasks = [task for task in asyncio.Task.all_tasks() if task is not
+             asyncio.tasks.Task.current_task()]
+    list(map(lambda task: task.cancel(), tasks))
+    LOGGER.info('All tasks are finished')
 
 
 @asynccontextmanager
@@ -481,4 +557,5 @@ async def strava_connector(login: str, password: str):
 
     finally:
         await small_strava.close()
+        await shutdown()
         LOGGER.info('Session closed')

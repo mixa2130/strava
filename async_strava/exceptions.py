@@ -15,6 +15,16 @@ class StravaTooManyRequests(Exception):
         return "Http 429 status code - too many requests per time unit"
 
 
+class ServerError(Exception):
+    """Strava server error"""
+
+    def __init__(self, status_code):
+        self.code = status_code
+
+    def __repr__(self):
+        return f"{self.code} - Server error"
+
+
 class NonRunActivity(Exception):
     """Non-running activity, such as cardio"""
 
@@ -36,3 +46,15 @@ class ActivityNotExist(Exception):
 
     def __repr__(self):
         return f'Activity {self.uri} has been deleted'
+
+
+class ParserError(Exception):
+    """Failure during web page parsing: Programmer made a mistake"""
+
+    def __init__(self, activity_uri: str, exception_desc: str):
+        self.uri = activity_uri
+        self.exc = exception_desc
+
+    def __repr__(self):
+        return f'{self.exc} during parsing {self.uri}. ' \
+               f'Please create an issue in https://github.com/mixa2130/strava/issues'
