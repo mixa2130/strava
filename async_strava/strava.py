@@ -418,6 +418,30 @@ class Strava(AsyncClass):
                               device=device_section['device'],
                               gear=device_section['gear'])
 
+    @staticmethod
+    def utc_to_local(timestamp: str):
+        """
+        UTC timestamp converter
+
+        Output instance:
+        datetime.datetime(2021, 5, 8, 18, 38, 29, tzinfo=datetime.timezone(datetime.timedelta(seconds=10800), 'MSK'))
+
+        :param timestamp: utc timestamp in format '0000-00-00 00:00:00 UTC'
+        :type timestamp: str
+
+        :return: local timestamp in datetime format
+        """
+        utc_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S UTC")
+        return utc_dt.replace(tzinfo=timezone.utc).astimezone(tz=None)
+
+    @staticmethod
+    def nickname_converter(raw_nickname: str) -> str:
+        """Validates obtained nickname"""
+        subscriber_index = raw_nickname.find('Subscriber')
+        nick: str = raw_nickname[0:subscriber_index] if subscriber_index != -1 else raw_nickname
+
+        return nick
+
     async def _process_activity_cluster(self, activity_cluster) -> Activity:
         """
         Processing of the activity cluster, presented on the page of recent club activities.
@@ -430,35 +454,12 @@ class Strava(AsyncClass):
 
         :param activity_cluster: bs object: class 'bs4.element.Tag'
         """
-
-        def utc_to_local(timestamp: str):
-            """
-            UTC timestamp converter
-
-            Output instance:
-            datetime.datetime(2021, 5, 8, 18, 38, 29, tzinfo=datetime.timezone(datetime.timedelta(seconds=10800), 'MSK'))
-
-            :param timestamp: utc timestamp in format '0000-00-00 00:00:00 UTC'
-            :type timestamp: str
-
-            :return: local timestamp in datetime format
-            """
-            utc_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S UTC")
-            return utc_dt.replace(tzinfo=timezone.utc).astimezone(tz=None)
-
-        def nickname_converter(raw_nickname: str) -> str:
-            """Validates obtained nickname"""
-            subscriber_index = raw_nickname.find('Subscriber')
-            nick: str = raw_nickname[0:subscriber_index] if subscriber_index != -1 else raw_nickname
-
-            return nick
-
         reg = re.compile('[\n]')
         entry_head = activity_cluster.select_one('div.entry-head')
 
         activity_timestamp = entry_head.select_one('time.timestamp').get('datetime')
-        local_dt = utc_to_local(activity_timestamp)
-        nickname: str = nickname_converter(reg.sub('', entry_head.select_one('a.entry-athlete').text))
+        local_dt = self.utc_to_local(activity_timestamp)
+        nickname: str = self.nickname_converter(reg.sub('', entry_head.select_one('a.entry-athlete').text))
         route = bool(activity_cluster.select('a.entry-image.activity-map'))
 
         entry_body = activity_cluster.select_one('h3.entry-title.activity-title').select_one('strong').select_one('a')
@@ -481,6 +482,39 @@ class Strava(AsyncClass):
         except ParserError as exc:
             LOGGER.info(repr(exc))
 
+    async def _process_group_activities_cluster(self, cluster):
+        reg = re.compile('[\n]')
+
+        group_entry_head = cluster.select_one('div.entry-head')
+        timestamp = group_entry_head.select_one('time.timestamp').get('datetime')
+        local_dt = self.utc_to_local(timestamp)
+
+        route: bool = bool(cluster.select('div.group-map'))
+
+        activities: List[Activity] = []
+        # Group activity cluster can't exist without entries.
+        for entry in cluster.select('li.feed-entry.entity-details'):
+            nickname: str = self.nickname_converter(reg.sub('', entry.select_one('a.entry-athlete').text))
+
+            entry_title = entry.select_one('a.minimal')
+            activity_href = entry_title.get('href')
+            activity_title = entry_title.text
+            try:
+                activity_values = await self._process_activity_page('https://www.strava.com' + activity_href)
+                activities.append(Activity(route_exist=route, activity_datetime=local_dt,
+                                           activity_title=activity_title.strip(), user_nickname=nickname,
+                                           activity_values=activity_values))
+            except NonRunActivity as exc:
+                LOGGER.info(repr(exc))
+
+            except ActivityNotExist as exc:
+                LOGGER.info(repr(exc))
+
+            except ParserError as exc:
+                LOGGER.info(repr(exc))
+
+        # return activities
+
     async def _get_tasks(self, page_url: str, tasks: list) -> int:
         """
 
@@ -493,13 +527,17 @@ class Strava(AsyncClass):
         soup = await self._get_soup(await response.text())
 
         single_activities_blocks = soup.select('div.activity.entity-details.feed-entry')
+        group_activities_blocks = soup.select('div.feed-entry.group-activity')
 
-        if len(single_activities_blocks) == 0:
+        if len(single_activities_blocks) == 0 and len(group_activities_blocks) == 0:
             # No more pages
             return 0
 
         for cluster in single_activities_blocks:
             tasks.append(asyncio.create_task(self._process_activity_cluster(cluster)))
+
+        for group_cluster in group_activities_blocks:
+            tasks.append(asyncio.create_task(self._process_group_activities_cluster(group_cluster)))
 
         before: str = single_activities_blocks[len(single_activities_blocks) - 1].get('data-updated-at')
         return int(before)
