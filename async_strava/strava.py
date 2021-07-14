@@ -19,7 +19,7 @@ from lxml import html
 from async_class import AsyncClass
 from .exceptions import StravaSessionFailed, ServerError, StravaTooManyRequests, NonRunActivity, ActivityNotExist, \
     ParserError
-from .attributes import Activity, ActivityValues
+from .attributes import Activity, ActivityValues, EMPTY_ACTIVITY, EMPTY_ACTIVITY_VALUE
 
 # Configure logging
 LOGGER = logging.getLogger('strava_crawler')
@@ -50,7 +50,7 @@ def write_club_activities_to_file(results: List[Activity], mode: str = 'a'):
     """
     with open('results.txt', mode) as file:
         for activity in results:
-            if activity is not None:
+            if activity is not None and activity != EMPTY_ACTIVITY:
                 out_activity_dict = activity._asdict()
                 for key in out_activity_dict:
                     if key == 'activity_values':
@@ -388,61 +388,43 @@ class Strava(AsyncClass):
         response = await self.get_response(activity_href)
         soup = await self._get_soup(await response.text())
 
-        # Activity type
-        title_block = soup.select_one('span.title')
-        if title_block is None:
-            # Server errors have been proceeded previously in get_response
-            # If there is no activity title - then we've been redirected to the dashboard
-            raise ActivityNotExist(activity_href)
+        try:
+            # Activity type
+            title_block = soup.select_one('span.title')
+            if title_block is None:
+                # Server errors have been proceeded previously in get_response
+                # If there is no activity title - then we've been redirected to the dashboard
+                raise ActivityNotExist(activity_href)
 
-        # Distance, Moving time, Pace block
-        inline_section: dict = self._process_inline_section(
-            stat_section=soup.select_one('ul.inline-stats.section'),
-            activity_href=activity_href)
+            # Distance, Moving time, Pace block
+            inline_section: dict = self._process_inline_section(
+                stat_section=soup.select_one('ul.inline-stats.section'),
+                activity_href=activity_href)
 
-        # Elevation, Calories blocks
-        more_stats_section: dict = self._process_more_stats(
-            more_stats_section=soup.select_one('div.section.more-stats'),
-            activity_href=activity_href)
+            # Elevation, Calories blocks
+            more_stats_section: dict = self._process_more_stats(
+                more_stats_section=soup.select_one('div.section.more-stats'),
+                activity_href=activity_href)
 
-        # Device, Gear blocks
-        device_section = self._process_device_section(
-            device_cluster=soup.select_one('div.section.device-section'),
-            activity_href=activity_href)
+            # Device, Gear blocks
+            device_section = self._process_device_section(
+                device_cluster=soup.select_one('div.section.device-section'),
+                activity_href=activity_href)
 
-        return ActivityValues(distance=inline_section['distance'],
-                              moving_time=inline_section['moving_time'],
-                              avg_pace=inline_section['avg_pace'],
-                              elevation_gain=more_stats_section['elevation_gain'],
-                              calories=more_stats_section['calories'],
-                              device=device_section['device'],
-                              gear=device_section['gear'])
+        except (NonRunActivity, ActivityNotExist, ParserError) as exc:
+            LOGGER.info(repr(exc))
+            return EMPTY_ACTIVITY_VALUE
 
-    @staticmethod
-    def utc_to_local(timestamp: str):
-        """
-        UTC timestamp converter
+        else:
+            return ActivityValues(distance=inline_section['distance'],
+                                  moving_time=inline_section['moving_time'],
+                                  avg_pace=inline_section['avg_pace'],
+                                  elevation_gain=more_stats_section['elevation_gain'],
+                                  calories=more_stats_section['calories'],
+                                  device=device_section['device'],
+                                  gear=device_section['gear'])
 
-        Output instance:
-        datetime.datetime(2021, 5, 8, 18, 38, 29, tzinfo=datetime.timezone(datetime.timedelta(seconds=10800), 'MSK'))
-
-        :param timestamp: utc timestamp in format '0000-00-00 00:00:00 UTC'
-        :type timestamp: str
-
-        :return: local timestamp in datetime format
-        """
-        utc_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S UTC")
-        return utc_dt.replace(tzinfo=timezone.utc).astimezone(tz=None)
-
-    @staticmethod
-    def nickname_converter(raw_nickname: str) -> str:
-        """Validates obtained nickname"""
-        subscriber_index = raw_nickname.find('Subscriber')
-        nick: str = raw_nickname[0:subscriber_index] if subscriber_index != -1 else raw_nickname
-
-        return nick
-
-    async def _process_activity_cluster(self, activity_cluster) -> Activity:
+    async def _process_activity_cluster(self, activity_cluster, group_mode: bool = False):
         """
         Processing of the activity cluster, presented on the page of recent club activities.
 
@@ -454,66 +436,83 @@ class Strava(AsyncClass):
 
         :param activity_cluster: bs object: class 'bs4.element.Tag'
         """
-        reg = re.compile('[\n]')
+
+        def utc_to_local(timestamp: str):
+            """
+            UTC timestamp converter
+
+            Output instance:
+            datetime.datetime(2021, 5, 8, 18, 38, 29, tzinfo=datetime.timezone(datetime.timedelta(seconds=10800), 'MSK'))
+
+            :param timestamp: utc timestamp in format '0000-00-00 00:00:00 UTC'
+            :type timestamp: str
+
+            :return: local timestamp in datetime format
+            """
+            utc_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S UTC")
+            return utc_dt.replace(tzinfo=timezone.utc).astimezone(tz=None)
+
+        def nickname_converter(raw_nickname: str) -> str:
+            """Validates obtained nickname"""
+            # nickname looks like: '\nАлександр Мариев\nSubscriber\n'
+            nick: str = re.sub(r'\n|\bSubscriber\b', '', raw_nickname)
+
+            return nick.strip()
+
         entry_head = activity_cluster.select_one('div.entry-head')
-
         activity_timestamp = entry_head.select_one('time.timestamp').get('datetime')
-        local_dt = self.utc_to_local(activity_timestamp)
-        nickname: str = self.nickname_converter(reg.sub('', entry_head.select_one('a.entry-athlete').text))
-        route = bool(activity_cluster.select('a.entry-image.activity-map'))
+        local_dt = utc_to_local(activity_timestamp)
 
-        entry_body = activity_cluster.select_one('h3.entry-title.activity-title').select_one('strong').select_one('a')
+        if not group_mode:
+            nickname: str = nickname_converter(entry_head.select_one('a.entry-athlete').text)
 
-        activity_href = entry_body.get('href')
-        activity_title = entry_body.text
+            route = bool(activity_cluster.select('a.entry-image.activity-map'))
 
-        try:
+            entry_body = activity_cluster.select_one('h3.entry-title.activity-title').select_one('strong').select_one(
+                'a')
+
+            activity_href = entry_body.get('href')
+            activity_title = entry_body.text
+
             activity_values = await self._process_activity_page('https://www.strava.com' + activity_href)
+            if activity_values == EMPTY_ACTIVITY_VALUE:
+                return EMPTY_ACTIVITY
             return Activity(route_exist=route, activity_datetime=local_dt,
                             activity_title=activity_title.strip(), user_nickname=nickname,
                             activity_values=activity_values)
 
-        except NonRunActivity as exc:
-            LOGGER.info(repr(exc))
-
-        except ActivityNotExist as exc:
-            LOGGER.info(repr(exc))
-
-        except ParserError as exc:
-            LOGGER.info(repr(exc))
-
-    async def _process_group_activities_cluster(self, cluster):
-        reg = re.compile('[\n]')
-
-        group_entry_head = cluster.select_one('div.entry-head')
-        timestamp = group_entry_head.select_one('time.timestamp').get('datetime')
-        local_dt = self.utc_to_local(timestamp)
-
-        route: bool = bool(cluster.select('div.group-map'))
-
-        activities: List[Activity] = []
-        # Group activity cluster can't exist without entries.
-        for entry in cluster.select('li.feed-entry.entity-details'):
-            nickname: str = self.nickname_converter(reg.sub('', entry.select_one('a.entry-athlete').text))
-
-            entry_title = entry.select_one('a.minimal')
-            activity_href = entry_title.get('href')
-            activity_title = entry_title.text
-            try:
-                activity_values = await self._process_activity_page('https://www.strava.com' + activity_href)
-                activities.append(Activity(route_exist=route, activity_datetime=local_dt,
-                                           activity_title=activity_title.strip(), user_nickname=nickname,
-                                           activity_values=activity_values))
-            except NonRunActivity as exc:
-                LOGGER.info(repr(exc))
-
-            except ActivityNotExist as exc:
-                LOGGER.info(repr(exc))
-
-            except ParserError as exc:
-                LOGGER.info(repr(exc))
-
-        # return activities
+    # async def _process_group_activities_cluster(self, cluster):
+    #     reg = re.compile('[\n]')
+    #
+    #     group_entry_head = cluster.select_one('div.entry-head')
+    #     timestamp = group_entry_head.select_one('time.timestamp').get('datetime')
+    #     local_dt = self.utc_to_local(timestamp)
+    #
+    #     route: bool = bool(cluster.select('div.group-map'))
+    #
+    #     activities: List[Activity] = []
+    #     # Group activity cluster can't exist without entries.
+    #     for entry in cluster.select('li.feed-entry.entity-details'):
+    #         nickname: str = self.nickname_converter(reg.sub('', entry.select_one('a.entry-athlete').text))
+    #
+    #         entry_title = entry.select_one('a.minimal')
+    #         activity_href = entry_title.get('href')
+    #         activity_title = entry_title.text
+    #         try:
+    #             activity_values = await self._process_activity_page('https://www.strava.com' + activity_href)
+    #             activities.append(Activity(route_exist=route, activity_datetime=local_dt,
+    #                                        activity_title=activity_title.strip(), user_nickname=nickname,
+    #                                        activity_values=activity_values))
+    #         except NonRunActivity as exc:
+    #             LOGGER.info(repr(exc))
+    #
+    #         except ActivityNotExist as exc:
+    #             LOGGER.info(repr(exc))
+    #
+    #         except ParserError as exc:
+    #             LOGGER.info(repr(exc))
+    #
+    #     # return activities
 
     async def _get_tasks(self, page_url: str, tasks: list) -> int:
         """
@@ -536,8 +535,8 @@ class Strava(AsyncClass):
         for cluster in single_activities_blocks:
             tasks.append(asyncio.create_task(self._process_activity_cluster(cluster)))
 
-        for group_cluster in group_activities_blocks:
-            tasks.append(asyncio.create_task(self._process_group_activities_cluster(group_cluster)))
+        # for group_cluster in group_activities_blocks:
+        #     tasks.append(asyncio.create_task(self._process_group_activities_cluster(group_cluster)))
 
         before: str = single_activities_blocks[len(single_activities_blocks) - 1].get('data-updated-at')
         return int(before)
