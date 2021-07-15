@@ -1,6 +1,9 @@
 from typing import NamedTuple
 from datetime import datetime
 
+EMPTY_ACTIVITY_VALUE = -127
+EMPTY_ACTIVITY = -255
+
 
 class ActivityValues(NamedTuple):
     """Values from activity page"""
