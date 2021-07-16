@@ -1,5 +1,4 @@
 # async_strava
-____
 
 The strava project aims to provide an ability to quickly get big data not provided via current API.
 
@@ -14,7 +13,6 @@ If you would like to see some extra functions - as getting activity splits, segm
 Just open a new issue with a description why you need such functionality
 
 ## Installation
-____
 
 (Installing in a [virtual environment](https://pypi.python.org/pypi/virtualenv) is always recommended.)
 
@@ -33,7 +31,6 @@ PASSWORD="abrakadabra"
 ```
 
 ## Basic Usage
-____
 
 Please take a look at the source (in particular the async_strava.strava.Strava class), if you'd like to play around with the API.
 Most of the functions have been implemented at this point; however, it's still not such fast as I would like, and certain features, 
@@ -188,5 +185,5 @@ async with strava_connector(_login, _password) as strava_obj:
 _Will be fully redesigned and optimized in version 0.2.1_
 
 ## Still reading?
-____
+
 Take a look at [examples](https://github.com/mixa2130/strava/tree/master/examples) if something remained unclear
