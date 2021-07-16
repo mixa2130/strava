@@ -70,7 +70,7 @@ strava_obj = Strava(_login, _password)
 print(strava_obj.check_connection_setup())
     
 # Closing the session at the end of work - is a sign of good manners
-strava_obj.close()
+await strava_obj.close()
 ```
 
 _Using strava_connector - is preferable._

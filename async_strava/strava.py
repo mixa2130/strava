@@ -263,7 +263,7 @@ class Strava(AsyncClass):
                     divided_distance = re.findall(r'[\d.]', cluster)
                     distance = float(''.join(divided_distance))
 
-                if cluster_type == 'Moving Time' or cluster_type == 'Elapsed Time':
+                if cluster_type in ('Moving Time', 'Elapsed Time'):
                     time_values: List[str] = cluster.split(':')
 
                     if len(time_values) == 3:
@@ -437,7 +437,8 @@ class Strava(AsyncClass):
             UTC timestamp converter
 
             Output instance:
-            datetime.datetime(2021, 5, 8, 18, 38, 29, tzinfo=datetime.timezone(datetime.timedelta(seconds=10800), 'MSK'))
+            datetime.datetime(2021, 5, 8, 18, 38, 29,
+            tzinfo=datetime.timezone(datetime.timedelta(seconds=10800), 'MSK'))
 
             :param timestamp: utc timestamp in format '0000-00-00 00:00:00 UTC'
             :type timestamp: str
@@ -549,7 +550,7 @@ class Strava(AsyncClass):
         :return: generator, which yields Activity class instances
         """
         for activity in validate_lst:
-            if type(activity) == tuple:
+            if isinstance(activity, tuple):
                 for el in activity:
                     yield el
             elif activity != EMPTY_ACTIVITY:
