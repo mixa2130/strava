@@ -46,7 +46,8 @@ def write_club_activities_to_file(results: List[Activity], filename: str = 'resu
     NOTE: Remember that it's a synchronous function!!
 
     :param results: obtained info about activities
-    :param mode: file write mode: 'w', 'a'
+    :param mode: file write mode: 'w', 'a'. Default = 'w'
+    :param filename: default - 'results.txt'
     """
     with open(filename, mode) as file:
         for activity in results:
@@ -426,6 +427,7 @@ class Strava(AsyncClass):
     async def _process_activity_cluster(self, activity_cluster, group_mode: bool = False):
         """
         Processing of the activity cluster, presented on the page of recent club activities.
+        Works as for single, as for group activities
 
         Cluster contains a lot of useful information. That's why you may have a question:
         why do we need to get particular values exactly from activity page, and not from this cluster?
@@ -462,6 +464,7 @@ class Strava(AsyncClass):
         local_dt = utc_to_local(activity_timestamp)
 
         if not group_mode:
+            # Single activity cluster processing
             route = bool(activity_cluster.select('a.entry-image.activity-map'))
             nickname: str = nickname_converter(entry_head.select_one('a.entry-athlete').text)
 
@@ -476,6 +479,7 @@ class Strava(AsyncClass):
                             activity_title=activity_title.strip(), user_nickname=nickname,
                             activity_values=activity_values)
         else:
+            # Group cluster processing
             route: bool = bool(activity_cluster.select('div.group-map'))
 
             activities: List[Activity] = []
@@ -497,11 +501,9 @@ class Strava(AsyncClass):
 
     async def _get_tasks(self, page_url: str, tasks: list) -> int:
         """
+        Create tasks of single and group activities for concurrently execution
 
-        :param page_url:
-        :param tasks:
-        :return: 0 - no more pages
-                else - before
+        :return - before parameter for next page request. If it's the last page - 0.
         """
         response = await self.get_response(page_url)
         soup = await self._get_soup(await response.text())
@@ -513,7 +515,7 @@ class Strava(AsyncClass):
         group_len: int = len(group_activities_blocks)
 
         if single_len == 0 and group_len == 0:
-            # No more pages
+            # No more pages - we've found the last one
             return 0
 
         single_before: int = -1
@@ -539,11 +541,19 @@ class Strava(AsyncClass):
         if group_before == -1:
             return single_before
 
-        # As single_before was initialised, as group_before
+        # As single_before, as group_before was initialised
         return single_before if single_before < group_before else group_before
 
     @staticmethod
     def _validate_tasks_output(validate_lst: list):
+        """
+        Creates a generator from validate_list, which consist of:
+            Activity class instances - single activities, which've been parsed well,
+            EMPTY_ACTIVITY - single activity in which the error from exceptions.py has occurred,
+            and tuple of Activity class instances - group Activity.
+
+        :return: generator, which yields Activity class instances
+        """
         for activity in validate_lst:
             if type(activity) == tuple:
                 for el in activity:
@@ -552,7 +562,12 @@ class Strava(AsyncClass):
                 yield activity
 
     async def get_club_activities(self, club_id: int):
-        """"""
+        """
+        Get club activities, presented in https://www.strava.com/clubs/{club_id}/recent_activity page.
+        Retrieves as single, as group activities.
+
+        :return: the result generator, which yields objects of the Activity class
+        """
         club_activities_page_url: str = f'https://www.strava.com/clubs/{str(club_id)}/feed?feed_type=club'
 
         # Start pages processing
@@ -564,9 +579,7 @@ class Strava(AsyncClass):
                 club_activities_page_url + f'&before={before}&cursor={float(before)}',
                 activities_tasks)
 
-        raw_results: list = await asyncio.gather(*activities_tasks)
-        # raw_results consist of Activities instances
-        return self._validate_tasks_output(raw_results)
+        return self._validate_tasks_output(await asyncio.gather(*activities_tasks))
 
     def check_connection_setup(self) -> bool:
         return self.connection_established
