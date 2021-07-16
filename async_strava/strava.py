@@ -39,7 +39,7 @@ def bs_object(text):
     return Bs(text, 'html.parser')
 
 
-def write_club_activities_to_file(results: List[Activity], mode: str = 'a'):
+def write_club_activities_to_file(results: List[Activity], filename: str = 'results.txt', mode: str = 'a'):
     """
     Represents activity results in a well-readable view.
 
@@ -48,7 +48,7 @@ def write_club_activities_to_file(results: List[Activity], mode: str = 'a'):
     :param results: obtained info about activities
     :param mode: file write mode: 'w', 'a'
     """
-    with open('results.txt', mode) as file:
+    with open(filename, mode) as file:
         for activity in results:
             out_activity_dict = activity._asdict()
             for key in out_activity_dict:
@@ -492,8 +492,8 @@ class Strava(AsyncClass):
                     activities.append(Activity(route_exist=route, activity_datetime=local_dt,
                                                activity_title=activity_title.strip(), user_nickname=nickname,
                                                activity_values=activity_values))
-            # print(activities)
-            return activities
+
+            return tuple(activities)
 
     async def _get_tasks(self, page_url: str, tasks: list) -> int:
         """
@@ -543,21 +543,16 @@ class Strava(AsyncClass):
         return single_before if single_before < group_before else group_before
 
     @staticmethod
-    def _validate_tasks_output(validate_lst: list) -> List[Activity]:
-        out_lst: List[Activity] = []
-
-        for value in validate_lst:
-
-            if type(value) == list:
-                # for el in value:
-                #     out_lst.append(el)
-                out_lst.extend(value) ## change to just append
-            elif value != EMPTY_ACTIVITY:
-                out_lst.append(value)
-
-        return out_lst
+    def _validate_tasks_output(validate_lst: list):
+        for activity in validate_lst:
+            if type(activity) == tuple:
+                for el in activity:
+                    yield el
+            elif activity != EMPTY_ACTIVITY:
+                yield activity
 
     async def get_club_activities(self, club_id: int):
+        """"""
         club_activities_page_url: str = f'https://www.strava.com/clubs/{str(club_id)}/feed?feed_type=club'
 
         # Start pages processing
@@ -570,10 +565,8 @@ class Strava(AsyncClass):
                 activities_tasks)
 
         raw_results: list = await asyncio.gather(*activities_tasks)
-        results = self._validate_tasks_output(raw_results)
-
-        LOGGER.info(f'Found {len(results)} activities')
-        write_club_activities_to_file(results)
+        # raw_results consist of Activities instances
+        return self._validate_tasks_output(raw_results)
 
     def check_connection_setup(self) -> bool:
         return self.connection_established
@@ -583,6 +576,7 @@ class Strava(AsyncClass):
 
 
 async def shutdown():
+    """Closes unfinished tasks"""
     tasks = [task for task in asyncio.Task.all_tasks() if task is not
              asyncio.tasks.Task.current_task()]
     list(map(lambda task: task.cancel(), tasks))
