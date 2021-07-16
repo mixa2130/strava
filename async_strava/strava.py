@@ -170,7 +170,7 @@ class Strava(AsyncClass):
 
         return False
 
-    async def get_response(self, uri):
+    async def _get_response(self, uri):
         """
         In my mind - this function has to proceed and return "get" request response.
         It has to proceed such errors, as 429, ServerDisconnectedError, ..
@@ -192,8 +192,6 @@ class Strava(AsyncClass):
                     raise StravaTooManyRequests
 
                 if status_code - 400 >= 0:
-                    # This error will cancel connection.
-                    # Therefore, within the framework of this class, it is not processed
                     raise ServerError(status_code)
 
             return response
@@ -219,7 +217,6 @@ class Strava(AsyncClass):
 
     async def get_strava_nickname_from_uri(self, profile_uri: str) -> str:
         """
-        REFORMAT
         Gets nickname from strava user profile page.
         If page not found - def will return '' - an empty str.
 
@@ -228,18 +225,15 @@ class Strava(AsyncClass):
          strava won't let us in for 10 minutes at least
         :return: user nickname from transmitted uri
         """
-        response = await self.get_response(profile_uri)
-
-        if response.status == 429:
-            raise StravaTooManyRequests
-
-        if response.status != 200:
-            LOGGER.info('status %s - %i', profile_uri, response.status)
+        try:
+            response = await self._get_response(profile_uri)
+        except ServerError as exc:
+            LOGGER.info('status %s - %s', profile_uri, repr(exc))
             return ''
 
         soup = await self._get_soup(await response.text())
-
         title = soup.select_one('title').text
+
         return title[(title.find('| ') + 2):]
 
     @staticmethod
@@ -385,7 +379,7 @@ class Strava(AsyncClass):
 
         :param activity_href: activity page uri
         """
-        response = await self.get_response(activity_href)
+        response = await self._get_response(activity_href)
         soup = await self._get_soup(await response.text())
 
         try:
@@ -505,7 +499,7 @@ class Strava(AsyncClass):
 
         :return - before parameter for next page request. If it's the last page - 0.
         """
-        response = await self.get_response(page_url)
+        response = await self._get_response(page_url)
         soup = await self._get_soup(await response.text())
 
         single_activities_blocks = soup.select('div.activity.entity-details.feed-entry')
