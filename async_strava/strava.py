@@ -39,16 +39,17 @@ def bs_object(text):
     return Bs(text, 'html.parser')
 
 
-def write_club_activities_to_file(results: List[Activity], mode: str = 'a'):
+def write_club_activities_to_file(results: List[Activity], filename: str = 'results.txt', mode: str = 'a'):
     """
     Represents activity results in a well-readable view.
 
     NOTE: Remember that it's a synchronous function!!
 
     :param results: obtained info about activities
-    :param mode: file write mode: 'w', 'a'
+    :param mode: file write mode: 'w', 'a'. Default = 'w'
+    :param filename: default - 'results.txt'
     """
-    with open('results.txt', mode) as file:
+    with open(filename, mode) as file:
         for activity in results:
             out_activity_dict = activity._asdict()
             for key in out_activity_dict:
@@ -169,7 +170,7 @@ class Strava(AsyncClass):
 
         return False
 
-    async def get_response(self, uri):
+    async def _get_response(self, uri):
         """
         In my mind - this function has to proceed and return "get" request response.
         It has to proceed such errors, as 429, ServerDisconnectedError, ..
@@ -191,8 +192,6 @@ class Strava(AsyncClass):
                     raise StravaTooManyRequests
 
                 if status_code - 400 >= 0:
-                    # This error will cancel connection.
-                    # Therefore, within the framework of this class, it is not processed
                     raise ServerError(status_code)
 
             return response
@@ -218,7 +217,6 @@ class Strava(AsyncClass):
 
     async def get_strava_nickname_from_uri(self, profile_uri: str) -> str:
         """
-        REFORMAT
         Gets nickname from strava user profile page.
         If page not found - def will return '' - an empty str.
 
@@ -227,18 +225,15 @@ class Strava(AsyncClass):
          strava won't let us in for 10 minutes at least
         :return: user nickname from transmitted uri
         """
-        response = await self.get_response(profile_uri)
-
-        if response.status == 429:
-            raise StravaTooManyRequests
-
-        if response.status != 200:
-            LOGGER.info('status %s - %i', profile_uri, response.status)
+        try:
+            response = await self._get_response(profile_uri)
+        except ServerError as exc:
+            LOGGER.info('status %s - %s', profile_uri, repr(exc))
             return ''
 
         soup = await self._get_soup(await response.text())
-
         title = soup.select_one('title').text
+
         return title[(title.find('| ') + 2):]
 
     @staticmethod
@@ -268,7 +263,7 @@ class Strava(AsyncClass):
                     divided_distance = re.findall(r'[\d.]', cluster)
                     distance = float(''.join(divided_distance))
 
-                if cluster_type == 'Moving Time' or cluster_type == 'Elapsed Time':
+                if cluster_type in ('Moving Time', 'Elapsed Time'):
                     time_values: List[str] = cluster.split(':')
 
                     if len(time_values) == 3:
@@ -384,7 +379,7 @@ class Strava(AsyncClass):
 
         :param activity_href: activity page uri
         """
-        response = await self.get_response(activity_href)
+        response = await self._get_response(activity_href)
         soup = await self._get_soup(await response.text())
 
         try:
@@ -426,6 +421,7 @@ class Strava(AsyncClass):
     async def _process_activity_cluster(self, activity_cluster, group_mode: bool = False):
         """
         Processing of the activity cluster, presented on the page of recent club activities.
+        Works as for single, as for group activities
 
         Cluster contains a lot of useful information. That's why you may have a question:
         why do we need to get particular values exactly from activity page, and not from this cluster?
@@ -441,7 +437,8 @@ class Strava(AsyncClass):
             UTC timestamp converter
 
             Output instance:
-            datetime.datetime(2021, 5, 8, 18, 38, 29, tzinfo=datetime.timezone(datetime.timedelta(seconds=10800), 'MSK'))
+            datetime.datetime(2021, 5, 8, 18, 38, 29,
+            tzinfo=datetime.timezone(datetime.timedelta(seconds=10800), 'MSK'))
 
             :param timestamp: utc timestamp in format '0000-00-00 00:00:00 UTC'
             :type timestamp: str
@@ -462,6 +459,7 @@ class Strava(AsyncClass):
         local_dt = utc_to_local(activity_timestamp)
 
         if not group_mode:
+            # Single activity cluster processing
             route = bool(activity_cluster.select('a.entry-image.activity-map'))
             nickname: str = nickname_converter(entry_head.select_one('a.entry-athlete').text)
 
@@ -476,6 +474,7 @@ class Strava(AsyncClass):
                             activity_title=activity_title.strip(), user_nickname=nickname,
                             activity_values=activity_values)
         else:
+            # Group cluster processing
             route: bool = bool(activity_cluster.select('div.group-map'))
 
             activities: List[Activity] = []
@@ -492,18 +491,16 @@ class Strava(AsyncClass):
                     activities.append(Activity(route_exist=route, activity_datetime=local_dt,
                                                activity_title=activity_title.strip(), user_nickname=nickname,
                                                activity_values=activity_values))
-            # print(activities)
-            return activities
+
+            return tuple(activities)
 
     async def _get_tasks(self, page_url: str, tasks: list) -> int:
         """
+        Create tasks of single and group activities for concurrently execution
 
-        :param page_url:
-        :param tasks:
-        :return: 0 - no more pages
-                else - before
+        :return - before parameter for next page request. If it's the last page - 0.
         """
-        response = await self.get_response(page_url)
+        response = await self._get_response(page_url)
         soup = await self._get_soup(await response.text())
 
         single_activities_blocks = soup.select('div.activity.entity-details.feed-entry')
@@ -513,7 +510,7 @@ class Strava(AsyncClass):
         group_len: int = len(group_activities_blocks)
 
         if single_len == 0 and group_len == 0:
-            # No more pages
+            # No more pages - we've found the last one
             return 0
 
         single_before: int = -1
@@ -539,25 +536,33 @@ class Strava(AsyncClass):
         if group_before == -1:
             return single_before
 
-        # As single_before was initialised, as group_before
+        # As single_before, as group_before was initialised
         return single_before if single_before < group_before else group_before
 
     @staticmethod
-    def _validate_tasks_output(validate_lst: list) -> List[Activity]:
-        out_lst: List[Activity] = []
+    def _validate_tasks_output(validate_lst: list):
+        """
+        Creates a generator from validate_list, which consist of:
+            Activity class instances - single activities, which've been parsed well,
+            EMPTY_ACTIVITY - single activity in which the error from exceptions.py has occurred,
+            and tuple of Activity class instances - group Activity.
 
-        for value in validate_lst:
-
-            if type(value) == list:
-                # for el in value:
-                #     out_lst.append(el)
-                out_lst.extend(value) ## change to just append
-            elif value != EMPTY_ACTIVITY:
-                out_lst.append(value)
-
-        return out_lst
+        :return: generator, which yields Activity class instances
+        """
+        for activity in validate_lst:
+            if isinstance(activity, tuple):
+                for el in activity:
+                    yield el
+            elif activity != EMPTY_ACTIVITY:
+                yield activity
 
     async def get_club_activities(self, club_id: int):
+        """
+        Get club activities, presented in https://www.strava.com/clubs/{club_id}/recent_activity page.
+        Retrieves as single, as group activities.
+
+        :return: the result generator, which yields objects of the Activity class
+        """
         club_activities_page_url: str = f'https://www.strava.com/clubs/{str(club_id)}/feed?feed_type=club'
 
         # Start pages processing
@@ -569,11 +574,7 @@ class Strava(AsyncClass):
                 club_activities_page_url + f'&before={before}&cursor={float(before)}',
                 activities_tasks)
 
-        raw_results: list = await asyncio.gather(*activities_tasks)
-        results = self._validate_tasks_output(raw_results)
-
-        LOGGER.info(f'Found {len(results)} activities')
-        write_club_activities_to_file(results)
+        return self._validate_tasks_output(await asyncio.gather(*activities_tasks))
 
     def check_connection_setup(self) -> bool:
         return self.connection_established
@@ -583,6 +584,7 @@ class Strava(AsyncClass):
 
 
 async def shutdown():
+    """Closes unfinished tasks"""
     tasks = [task for task in asyncio.Task.all_tasks() if task is not
              asyncio.tasks.Task.current_task()]
     list(map(lambda task: task.cancel(), tasks))
