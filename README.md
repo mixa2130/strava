@@ -172,6 +172,21 @@ class ActivityValues(NamedTuple):
 ```
 _Deprecated since version 0.1.0, will be removed in version 0.2.0_
 
+### Get nicknames
+
+This function has been added for a friend - the organizer of the beermile.
+```python
+from async_strava import strava_connector
+
+_login: str = os.getenv('LOGIN')
+_password: str = os.getenv('PASSWORD')
+
+async with strava_connector(_login, _password) as strava_obj:
+    nickname: str = await strava_obj.get_strava_nickname_from_uri('https://www.strava.com/athletes/..')
+```
+
+_Will be fully redesigned and optimized in version 0.2.1_
+
 ## Still reading?
 ____
 Take a look at [examples](https://github.com/mixa2130/strava/tree/master/examples) if something remained unclear
