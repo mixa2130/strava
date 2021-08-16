@@ -18,8 +18,7 @@ import aiohttp
 from bs4 import BeautifulSoup as Bs
 from lxml import html
 from async_class import AsyncClass
-from .exceptions import StravaSessionFailed, ServerError, StravaTooManyRequests, NonRunActivity, ActivityNotExist, \
-    ParserError
+from .exceptions import StravaSessionFailed, ServerError, StravaTooManyRequests, ActivityNotExist, ParserError
 from .attributes import ActivityInfo, Activity
 
 # Configure logging
@@ -221,9 +220,20 @@ class Strava(AsyncClass):
         :raise ActivityNotExist: Activity has been deleted
         :return {distance:, moving_time:, pace:}
         """
-        distance = 0
-        moving_time = {'hours': 0, 'minutes': 0, 'seconds': 0}
-        pace: dict = {'min_km': 0, 'sec_km': 0}
+
+        def str_time_to_sec(_time: list) -> int:
+            _seconds: int = 0
+            n = len(_time) - 1
+
+            for time_el in _time:
+                _seconds += int(time_el) * pow(60, n)
+                n -= 1
+
+            return _seconds
+
+        distance: float = 0.0
+        moving_time: int = 0
+        pace: int = 0
 
         try:
             activity_details = stat_section.select('li')
@@ -235,40 +245,30 @@ class Strava(AsyncClass):
 
                 if cluster_type == 'Distance':
                     divided_distance = re.findall(r'[\d.]', cluster)
-                    distance = float(''.join(divided_distance))
+
+                    if len(divided_distance) != 0:
+                        distance = float(''.join(divided_distance))
+                        # else it would be a default value
 
                 if cluster_type in ('Moving Time', 'Elapsed Time'):
-                    time_values: List[str] = cluster.split(':')
-
-                    if len(time_values) == 3:
-                        for time_index, key in enumerate(moving_time.keys()):
-                            moving_time[key] = int(time_values[time_index])
-                    else:
-                        moving_time['minutes'] = int(time_values[0])
-                        moving_time['seconds'] = int(time_values[1])
+                    moving_time: int = str_time_to_sec(cluster.split(':'))
 
                 if cluster_type == 'Pace':
-                    pace_values = cluster.split(':')  # ['7', '18/km'] ['7s/km']
-                    for index, value in enumerate(pace_values):
-                        str_value = re.search(r'\d+', value)
-                        pace_values[index]: int = int(str_value.group(0)) if str_value is not None else 0
+                    divided_pace: List[str] = cluster.split(':')  # ['7', '18/km'] ['7s/km']
+                    raw_pace_vls: List[int] = []
 
-                    if len(pace_values) == 1:
-                        pace['sec_km'] = pace_values[0]
-                    else:
-                        pace['min_km'] = pace_values[0]
-                        pace['sec_km'] = pace_values[1]
+                    for index, value in enumerate(divided_pace):
+                        str_value = re.search(r'\d+', value)
+
+                        if str_value is not None:
+                            raw_pace_vls.append(int(str_value.group(0)))
+
+                    pace: int = str_time_to_sec(raw_pace_vls)
+
+            return {'distance': distance, 'moving_time': moving_time, 'pace': pace}
 
         except Exception as exc:
-            LOGGER.error(repr(exc))
             raise ParserError(activity_href, repr(exc))
-
-        if moving_time['minutes'] == moving_time['seconds'] == moving_time['hours'] == 0 or \
-                distance == 0 or pace['min_km'] == pace['sec_km'] == 0:
-            # Run activity can't exist without one of this params
-            raise NonRunActivity(activity_href)
-
-        return {'distance': distance, 'moving_time': moving_time, 'avg_pace': pace}
 
     @staticmethod
     def _process_more_stats(more_stats_section, activity_href) -> dict:
@@ -283,32 +283,31 @@ class Strava(AsyncClass):
         calories: int = 0
 
         try:
-            if more_stats_section:
-                rows = more_stats_section.select('div.row')
+            rows = more_stats_section.select('div.row')
 
-                for row in rows:
-                    values = row.select('div.spans3')
-                    descriptions = row.select('div.spans5')
+            for row in rows:
+                values = row.select('div.spans3')
+                descriptions = row.select('div.spans5')
 
-                    for index, desc in enumerate(descriptions):
-                        if desc.text.strip() == 'Elevation':
-                            # We get value in format '129m\n' or '\n129m\n'
-                            elevation = re.search('[0-9]+', values[index].text)
+                for index, desc in enumerate(descriptions):
+                    if desc.text.strip() == 'Elevation':
+                        # We get value in format '129m\n' or '\n129m\n'
+                        elevation = re.search('[0-9]+', values[index].text)
 
-                            if elevation is not None:
-                                elevation_gain = int(elevation.group())
+                        if elevation is not None:
+                            elevation_gain = int(elevation.group())
 
-                        if desc.text.strip() == 'Calories':
-                            calories_value: str = values[index].text.strip()
+                    if desc.text.strip() == 'Calories':
+                        calories_value: str = values[index].text.strip()
 
-                            # We can get calories in such views: '-' <=> 0, '684', '1,099' <=> 1099
-                            if calories_value != '—':
-                                calories: int = int(re.sub(r',', r'', calories_value))
+                        # We can get calories in such views: '-' <=> 0, '684', '1,099' <=> 1099
+                        if calories_value != '—':
+                            calories: int = int(re.sub(r',', r'', calories_value))
+
+            return {'elevation_gain': elevation_gain, 'calories': calories}
+
         except Exception as exc:
-            LOGGER.error(repr(exc))
             raise ParserError(activity_href, repr(exc))
-
-        return {'elevation_gain': elevation_gain, 'calories': calories}
 
     @staticmethod
     def _process_device_section(device_cluster, activity_href) -> dict:
@@ -353,11 +352,6 @@ class Strava(AsyncClass):
 
         :param activity_href: activity page uri
         """
-
-        # def split_title(title: str) -> tuple:
-        #     tmp_splitter: list = title.split('\n')  # ['', 'Ульяна Зверёк', '–', 'Treadmill workout', '']
-        #     return tmp_splitter[1], tmp_splitter[3]
-
         response = await self._get_response(activity_href)
         soup = await self._get_soup(await response.text())
 
@@ -368,7 +362,7 @@ class Strava(AsyncClass):
                 # If there is no activity title - then we've been redirected to the dashboard
                 raise ActivityNotExist(activity_href)
 
-            # Distance, Moving time, Pace block
+            # Distance, Moving time, Pace blocks
             inline_section: dict = self._process_inline_section(
                 stat_section=soup.select_one('ul.inline-stats.section'),
                 activity_href=activity_href)
@@ -380,14 +374,8 @@ class Strava(AsyncClass):
 
             activity_values: dict = {**inline_section, **more_stats_section}
 
-            # # Device, Gear blocks
-            # device_section = self._process_device_section(
-            #     device_cluster=soup.select_one('div.section.device-section'),
-            #     activity_href=activity_href)
-
-            # activity['device'] = device_section
             return Activity(info=activity_info, values=activity_values)
-        except (NonRunActivity, ActivityNotExist, ParserError) as exc:
+        except (ActivityNotExist, ParserError) as exc:
             LOGGER.info(repr(exc))
 
     async def _get_tasks(self, page_url: str, tasks: list) -> int:
@@ -481,7 +469,7 @@ class Strava(AsyncClass):
                 activities_tasks)
 
         value: list = await asyncio.gather(*activities_tasks)
-        print(value)
+        return value
 
     def check_connection_setup(self) -> bool:
         return self.connection_established
