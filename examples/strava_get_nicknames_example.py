@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 # from async_strava.attributes import Activity, ActivityValues
 # import datetime
 # import async_strava
-from async_strava import strava_connector, write_club_activities_to_file, Strava
+from async_strava import strava_connector
 
 
 def read_file(file_name='strava_uris.txt'):
@@ -38,14 +38,23 @@ async def get_nicknames(strava_obj) -> List[str]:
         return results
 
 
+async def get_activities(strava_obj):
+    # await strava_obj._process_activity_page('https://www.strava.com/activities/5777262591')
+    # await strava_obj._process_activity_page('https://www.strava.com/activities/5776569939')
+    # print(res)
+    results = await strava_obj.get_club_activities(786435)
+    # results = await strava_obj.get_club_activities(558646)
+
+
 async def main() -> NoReturn:
     """Example executor"""
     _login: str = os.getenv('LOGIN')
     _password: str = os.getenv('PASSWORD')
 
     async with strava_connector(_login, _password) as strava_obj:
-        nicknames: list = await get_nicknames(strava_obj)
-        print(nicknames)
+        await get_activities(strava_obj)
+        # nicknames: list = await get_nicknames(strava_obj)
+        # print(nicknames)
 
 
 if __name__ == '__main__':
