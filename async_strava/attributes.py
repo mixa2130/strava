@@ -8,7 +8,7 @@ class ActivityInfo(NamedTuple):
     href: str
     nickname: str
     type: str
-    date: datetime
+    date: str
 
 
 class Activity(NamedTuple):

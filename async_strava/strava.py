@@ -8,7 +8,7 @@ import re
 import json
 import asyncio
 
-from typing import NoReturn, List, NamedTuple
+from typing import NoReturn, List, Optional
 from contextlib import asynccontextmanager
 from sys import stdout
 from datetime import datetime, timedelta
@@ -150,43 +150,29 @@ class Strava(AsyncClass):
 
         :param uri: requested page
 
-        :raise StravaSessionFailed: if unable to reconnect or update strava session
+        # :raise StravaSessionFailed: if unable to reconnect or update strava session
         :return: request result obj
         """
-        try:
-            response = await self._session.get(uri)
-            status_code = response.status
+        response = await self._session.get(uri)
+        status_code = response.status
 
-            if status_code != 200:
+        if status_code != 200:
 
-                if status_code == 429:
-                    # This error will cancel connection.
-                    # Therefore, within the framework of this class, it is not processed
-                    raise StravaTooManyRequests
+            if status_code == 429:
+                # This error will cancel connection.
+                # Therefore, within the framework of this class, it is not processed
+                raise StravaTooManyRequests
 
-                if status_code - 400 >= 0:
+            if status_code - 400 >= 0:
+                # try to reconnect
+                LOGGER.info(f'try ro reconnect:{status_code}')
+                await asyncio.sleep(5)
+
+                response = await self._session.get(uri)
+                if response.status != 200:
                     raise ServerError(status_code)
 
-            return response
-
-        except aiohttp.ServerDisconnectedError:
-            LOGGER.info('ServerDisconnectedError in get_strava_nickname_from_uri %s', uri)
-
-            if self.connection_established:
-                # We would like to reconnect just one time,
-                # and not as much as tasks will come
-                self.connection_established = False
-
-                connection = await self._session_reconnecting()
-                if connection == -1:
-                    raise StravaSessionFailed
-
-                self.connection_established = True
-            else:
-                while not self.connection_established:
-                    await asyncio.sleep(4)
-
-            return await self._session.get(uri)
+        return response
 
     async def get_strava_nickname_from_uri(self, profile_uri: str) -> str:
         """
@@ -343,7 +329,8 @@ class Strava(AsyncClass):
 
         return {'device': device, 'gear': tuple(gear)}
 
-    async def _process_activity_page(self, activity_href: str, activity_info: ActivityInfo = None) -> Activity:
+    async def _process_activity_page(self, activity_href: str,
+                                     activity_info: ActivityInfo = None) -> Optional[Activity]:
         """
         Processes activity page, which contains 3 importable sections for us:
             1) inline-stats section - distance, moving time, pace blocks;
@@ -352,7 +339,12 @@ class Strava(AsyncClass):
 
         :param activity_href: activity page uri
         """
-        response = await self._get_response(activity_href)
+        try:
+            response = await self._get_response(activity_href)
+        except ServerError as exc:
+            LOGGER.info('status %s - %s', activity_href, repr(exc))
+            return None
+
         soup = await self._get_soup(await response.text())
 
         try:
@@ -375,6 +367,7 @@ class Strava(AsyncClass):
             activity_values: dict = {**inline_section, **more_stats_section}
 
             return Activity(info=activity_info, values=activity_values)
+
         except (ActivityNotExist, ParserError) as exc:
             LOGGER.info(repr(exc))
 
@@ -391,7 +384,7 @@ class Strava(AsyncClass):
             if raw_date['displayDate'] == 'Yesterday':
                 activity_date -= timedelta(days=1)
             elif raw_date['displayDate'] != 'Today':
-                activity_date = datetime.strptime(raw_date['displayDate'], '%B %d, %Y')
+                activity_date: datetime = datetime.strptime(raw_date['displayDate'], '%B %d, %Y')
 
             if not group_mode:
                 title: str = activity_info['activityName']
@@ -415,12 +408,16 @@ class Strava(AsyncClass):
                                 href=href,
                                 nickname=nickname,
                                 type=activity_type,
-                                date=activity_date)
-
-        response = await self._get_response(page_url)
-        soup = await self._get_soup(await response.text())
+                                date=datetime.strftime(activity_date, '%Y-%m-%d'))
 
         before: int = 0
+        try:
+            response = await self._get_response(page_url)
+        except ServerError as exc:
+            LOGGER.info('status %s - %s', page_url, repr(exc))
+            return before
+
+        soup = await self._get_soup(await response.text())
         activities: list = soup.select('div.content.web-feed-4-component')
 
         for activity in activities:
@@ -428,7 +425,6 @@ class Strava(AsyncClass):
 
             if activity_desc.get('activity') is not None:
                 # Single mode
-
                 validate_info: ActivityInfo = validate_react_activity_info(activity_desc['activity'],
                                                                            raw_date=activity_desc['activity'][
                                                                                'timeAndLocation'])
@@ -448,6 +444,20 @@ class Strava(AsyncClass):
             before: int = activity_desc['cursorData']['updated_at']
 
         return before
+
+    @staticmethod
+    def results_validator(results: List[Activity]):
+        validate_results = []
+        for activity in results:
+            if activity is not None:
+                json_activity: dict = activity._asdict()
+
+                tmp_activity_info: ActivityInfo = json_activity['info']
+                json_activity['info']: ActivityInfo = tmp_activity_info._asdict()
+                validate_results.append(json_activity)
+
+        with open('results.json', 'w') as json_file:
+            json.dump(validate_results, json_file)
 
     async def get_club_activities(self, club_id: int):
         """
@@ -469,7 +479,7 @@ class Strava(AsyncClass):
                 activities_tasks)
 
         value: list = await asyncio.gather(*activities_tasks)
-        return value
+        self.results_validator(value)
 
     def check_connection_setup(self) -> bool:
         return self.connection_established

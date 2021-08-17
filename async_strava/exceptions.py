@@ -56,5 +56,4 @@ class ParserError(Exception):
         self.exc = exception_desc
 
     def __repr__(self):
-        return f'{self.exc} during parsing {self.uri}. ' \
-               f'Please create an issue in https://github.com/mixa2130/strava/issues'
+        return f'{self.exc} during parsing {self.uri}.'
