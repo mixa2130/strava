@@ -52,7 +52,8 @@ class Strava(AsyncClass):
         connection = await self._session_reconnecting()
         if connection == 0:
             self.connection_established = True
-
+        else:
+            raise StravaSessionFailed
         # Session connection failure during initialization would be proceed in a context manager
 
     async def _strava_authorization(self):
@@ -74,8 +75,8 @@ class Strava(AsyncClass):
 
             return tokens[0]
 
-        html_text: str = await self._get_html('https://www.strava.com/login')
-        csrf_token: str = _csrf_token(html_text)
+        response = await self._session.get('https://www.strava.com/login')
+        csrf_token: str = _csrf_token(await response.text())
 
         parameters = {'authenticity_token': csrf_token,
                       'email': self._login,
@@ -108,11 +109,6 @@ class Strava(AsyncClass):
 
         # Can't reconnect
         return -1
-
-    async def _get_html(self, uri) -> str:
-        """Gets html page code """
-        response = await self._session.get(uri)
-        return await response.text()
 
     @staticmethod
     async def _get_soup(html_text: str):
@@ -433,8 +429,8 @@ class Strava(AsyncClass):
                     self._process_activity_page(activity_info=validate_info, activity_href=validate_info.href)))
             else:
                 # Group mode
-                for el in activity_desc.get('rowData').get('activities'):
-                    validate_info: ActivityInfo = validate_react_activity_info(el, group_mode=True,
+                for group_el in activity_desc.get('rowData').get('activities'):
+                    validate_info: ActivityInfo = validate_react_activity_info(group_el, group_mode=True,
                                                                                raw_date=activity_desc.get(
                                                                                    'timeAndLocation'))
 
@@ -446,8 +442,8 @@ class Strava(AsyncClass):
         return before
 
     @staticmethod
-    def results_validator(results: List[Activity]):
-        validate_results = []
+    def results_validator(results: List[Activity]) -> dict:
+        validate_results = list()
         for activity in results:
             if activity is not None:
                 json_activity: dict = activity._asdict()
@@ -456,8 +452,9 @@ class Strava(AsyncClass):
                 json_activity['info']: ActivityInfo = tmp_activity_info._asdict()
                 validate_results.append(json_activity)
 
-        with open('results.json', 'w') as json_file:
-            json.dump(validate_results, json_file)
+        return {'results': validate_results}
+        # with open('results.json', 'w') as json_file:
+        #     json.dump(validate_results, json_file)
 
     async def get_club_activities(self, club_id: int):
         """
@@ -469,7 +466,7 @@ class Strava(AsyncClass):
         club_activities_page_url: str = f'https://www.strava.com/clubs/{str(club_id)}/feed?feed_type=club'
 
         # Start pages processing
-        activities_tasks = []
+        activities_tasks = list()
         before: int = await self._get_tasks(club_activities_page_url, activities_tasks)
 
         while before != 0:
@@ -478,8 +475,7 @@ class Strava(AsyncClass):
                 club_activities_page_url + f'&before={before}&cursor={float(before)}',
                 activities_tasks)
 
-        value: list = await asyncio.gather(*activities_tasks)
-        self.results_validator(value)
+        return self.results_validator(await asyncio.gather(*activities_tasks))
 
     def check_connection_setup(self) -> bool:
         return self.connection_established
