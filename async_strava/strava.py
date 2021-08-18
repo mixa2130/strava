@@ -42,11 +42,12 @@ def bs_object(text):
 class Strava(AsyncClass):
     """Main class for interacting  with www.strava.com website"""
 
-    async def __ainit__(self, login: str, password: str) -> NoReturn:
+    async def __ainit__(self, login: str, password: str, filters: dict) -> NoReturn:
         self._session = aiohttp.ClientSession()
         self._login: str = login
         self._password: str = password
 
+        self.filters: dict = filters
         self.connection_established: bool = False
 
         connection = await self._session_reconnecting()
@@ -382,29 +383,34 @@ class Strava(AsyncClass):
             elif raw_date['displayDate'] != 'Today':
                 activity_date: datetime = datetime.strptime(raw_date['displayDate'], '%B %d, %Y')
 
-            if not group_mode:
-                title: str = activity_info['activityName']
-                activity_type: str = activity_info['type']
-                nickname: str = activity_info['athlete']['athleteName']
-                href: str = 'https://www.strava.com/activities/' + str(activity_info['id'])
+            comparsion_date: Optional[datetime] = self.filters.get('date')
+            if comparsion_date is not None:
+                if ((comparsion_date.day, comparsion_date.month, comparsion_date.year) ==
+                        (activity_date.day, activity_date.month, activity_date.year)):
 
-                routable: bool = False
-                tmp_route_checker = activity_info['mapAndPhotos'].get('isRoutable')
-                if tmp_route_checker is not None:
-                    routable = tmp_route_checker
-            else:
-                routable: bool = activity_info['is_routable']
-                href: str = 'https://www.strava.com/activities/' + str(activity_info['activity_id'])
-                activity_type: str = activity_info['activity_class_name']
-                nickname: str = activity_info['athlete_name']
-                title: str = activity_info['name']
+                    if not group_mode:
+                        title: str = activity_info['activityName']
+                        activity_type: str = activity_info['type']
+                        nickname: str = activity_info['athlete']['athleteName']
+                        href: str = 'https://www.strava.com/activities/' + str(activity_info['id'])
 
-            return ActivityInfo(routable=routable,
-                                title=title,
-                                href=href,
-                                nickname=nickname,
-                                type=activity_type,
-                                date=datetime.strftime(activity_date, '%Y-%m-%d'))
+                        routable: bool = False
+                        tmp_route_checker = activity_info['mapAndPhotos'].get('isRoutable')
+                        if tmp_route_checker is not None:
+                            routable = tmp_route_checker
+                    else:
+                        routable: bool = activity_info['is_routable']
+                        href: str = 'https://www.strava.com/activities/' + str(activity_info['activity_id'])
+                        activity_type: str = activity_info['activity_class_name']
+                        nickname: str = activity_info['athlete_name']
+                        title: str = activity_info['name']
+
+                    return ActivityInfo(routable=routable,
+                                        title=title,
+                                        href=href,
+                                        nickname=nickname,
+                                        type=activity_type,
+                                        date=datetime.strftime(activity_date, '%Y-%m-%d'))
 
         before: int = 0
         try:
@@ -418,12 +424,15 @@ class Strava(AsyncClass):
 
         for activity in activities:
             activity_desc: dict = json.loads(activity.get('data-react-props'))
+            before: int = activity_desc['cursorData']['updated_at']
 
             if activity_desc.get('activity') is not None:
                 # Single mode
                 validate_info: ActivityInfo = validate_react_activity_info(activity_desc['activity'],
                                                                            raw_date=activity_desc['activity'][
                                                                                'timeAndLocation'])
+                if validate_info is None:
+                    continue
 
                 tasks.append(asyncio.create_task(
                     self._process_activity_page(activity_info=validate_info, activity_href=validate_info.href)))
@@ -433,12 +442,11 @@ class Strava(AsyncClass):
                     validate_info: ActivityInfo = validate_react_activity_info(group_el, group_mode=True,
                                                                                raw_date=activity_desc.get(
                                                                                    'timeAndLocation'))
+                    if validate_info is None:
+                        continue
 
                     tasks.append(asyncio.create_task(self._process_activity_page(activity_info=validate_info,
                                                                                  activity_href=validate_info.href)))
-
-            before: int = activity_desc['cursorData']['updated_at']
-
         return before
 
     @staticmethod
@@ -452,9 +460,9 @@ class Strava(AsyncClass):
                 json_activity['info']: ActivityInfo = tmp_activity_info._asdict()
                 validate_results.append(json_activity)
 
+        with open('results.json', 'w') as json_file:
+            json.dump(validate_results, json_file)
         return {'results': validate_results}
-        # with open('results.json', 'w') as json_file:
-        #     json.dump(validate_results, json_file)
 
     async def get_club_activities(self, club_id: int):
         """
@@ -493,17 +501,19 @@ async def shutdown():
 
 
 @asynccontextmanager
-async def strava_connector(login: str, password: str):
+async def strava_connector(login: str, password: str, filters: dict = None):
     """
     Context manager for working with instances of Strava class.
 
     Available RuntimeError: generator didn't yield
     :param login: strava login
     :param password: strava password
+    :param filters:
 
     :raise StravaSessionFailed: if unable to reconnect or update strava session
     """
-    small_strava = await Strava(login, password)
+
+    small_strava = await Strava(login, password, filters if filters is not None else dict())
 
     try:
         if not small_strava.check_connection_setup():
