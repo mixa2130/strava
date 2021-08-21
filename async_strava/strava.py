@@ -79,12 +79,35 @@ class Strava(AsyncClass):
         response = await self._session.get('https://www.strava.com/login')
         csrf_token: str = _csrf_token(await response.text())
 
-        parameters = {'authenticity_token': csrf_token,
-                      'email': self._login,
-                      'password': self._password
-                      }
+        data = {'authenticity_token': csrf_token,
+                'email': self._login,
+                'password': self._password
+                }
 
-        return await self._session.post('https://www.strava.com/session', data=parameters)
+        return await self._session.post('https://www.strava.com/session', data=data)
+
+    async def connection_check(self, request_response) -> bool:
+        """
+        Checks the strava page connection by parsing the html code
+
+
+        :returns: - True - the connection is establish;
+                  - False - the connection isn't established.
+        """
+        html_text = await request_response.text()
+
+        if html_text[:500].find('logged-out') == -1:
+            # We've logged-in
+            return True
+
+        # Strava logged us out, maybe there is an alert message
+        soup = await self._get_soup(html_text)
+
+        alert_message = soup.select_one('div.alert-message')
+        if alert_message is not None:
+            LOGGER.error('alert message in a page: %s', alert_message.text)
+
+        return False
 
     async def _session_reconnecting(self) -> int:
         """
@@ -116,29 +139,6 @@ class Strava(AsyncClass):
         """Executes blocking task in an executor - another thread"""
         soup_loop = asyncio.get_running_loop()
         return await soup_loop.run_in_executor(None, bs_object, html_text)
-
-    async def connection_check(self, request_response) -> bool:
-        """
-        Checks the strava page connection by parsing the html code
-
-
-        :returns: - True - the connection is establish;
-                  - False - the connection isn't established.
-        """
-        html_text = await request_response.text()
-
-        if html_text[:500].find('logged-out') == -1:
-            # We've logged-in
-            return True
-
-        # Strava logged us out, maybe there is an alert message
-        soup = await self._get_soup(html_text)
-
-        alert_message = soup.select_one('div.alert-message')
-        if alert_message is not None:
-            LOGGER.error('alert message in a page: %s', alert_message.text)
-
-        return False
 
     async def _get_response(self, uri):
         """
@@ -233,7 +233,7 @@ class Strava(AsyncClass):
                         distance = float(''.join(divided_distance))
                         # else it would be a default value
 
-                if cluster_type in ('Moving Time', 'Elapsed Time'):
+                if cluster_type in ('Moving Time', 'Elapsed Time', 'Duration'):
                     moving_time: int = str_time_to_sec(cluster.split(':'))
 
                 if cluster_type == 'Pace':
@@ -265,32 +265,35 @@ class Strava(AsyncClass):
         elevation_gain: int = 0
         calories: int = 0
 
-        try:
-            rows = more_stats_section.select('div.row')
+        if more_stats_section is not None:
+            # Such block exists, but frontend may have changed
 
-            for row in rows:
-                values = row.select('div.spans3')
-                descriptions = row.select('div.spans5')
+            try:
+                rows = more_stats_section.select('div.row')
 
-                for index, desc in enumerate(descriptions):
-                    if desc.text.strip() == 'Elevation':
-                        # We get value in format '129m\n' or '\n129m\n'
-                        elevation = re.search('[0-9]+', values[index].text)
+                for row in rows:
+                    values = row.select('div.spans3')
+                    descriptions = row.select('div.spans5')
 
-                        if elevation is not None:
-                            elevation_gain = int(elevation.group())
+                    for index, desc in enumerate(descriptions):
+                        if desc.text.strip() == 'Elevation':
+                            # We get value in format '129m\n' or '\n129m\n'
+                            elevation = re.search('[0-9]+', values[index].text)
 
-                    if desc.text.strip() == 'Calories':
-                        calories_value: str = values[index].text.strip()
+                            if elevation is not None:
+                                elevation_gain = int(elevation.group())
 
-                        # We can get calories in such views: '-' <=> 0, '684', '1,099' <=> 1099
-                        if calories_value != '—':
-                            calories: int = int(re.sub(r',', r'', calories_value))
+                        if desc.text.strip() == 'Calories':
+                            calories_value: str = values[index].text.strip()
 
-            return {'elevation_gain': elevation_gain, 'calories': calories}
+                            # We can get calories in such views: '-' <=> 0, '684', '1,099' <=> 1099
+                            if calories_value != '—':
+                                calories: int = int(re.sub(r',', r'', calories_value))
 
-        except Exception as exc:
-            raise ParserError(activity_href, repr(exc))
+            except Exception as exc:
+                raise ParserError(activity_href, repr(exc))
+
+        return {'elevation_gain': elevation_gain, 'calories': calories}
 
     @staticmethod
     def _process_device_section(device_cluster, activity_href) -> dict:
@@ -332,7 +335,7 @@ class Strava(AsyncClass):
         Processes activity page, which contains 3 importable sections for us:
             1) inline-stats section - distance, moving time, pace blocks;
             2) more-stats section - elevation gain, calories blocks;
-            3) device section - device, gear blocks.
+            3) device section - device, gear blocks. - temporarily unavailable
 
         :param activity_href: activity page uri
         """
@@ -351,18 +354,23 @@ class Strava(AsyncClass):
                 # If there is no activity title - then we've been redirected to the dashboard
                 raise ActivityNotExist(activity_href)
 
+            # There maybe no such blocks as inline/more_stats.
+
             # Distance, Moving time, Pace blocks
+            # If there are no inline section - that's a problem(cause it's the most important section),
+            # and responsible function has to raise ParserError.
             inline_section: dict = self._process_inline_section(
                 stat_section=soup.select_one('ul.inline-stats.section'),
                 activity_href=activity_href)
 
             # Elevation, Calories blocks
+            # If there are no more stats - that's okay,
+            # responsible function will return nullify values.
             more_stats_section: dict = self._process_more_stats(
                 more_stats_section=soup.select_one('div.section.more-stats'),
                 activity_href=activity_href)
 
             activity_values: dict = {**inline_section, **more_stats_section}
-
             return Activity(info=activity_info, values=activity_values)
 
         except (ActivityNotExist, ParserError) as exc:
@@ -384,6 +392,7 @@ class Strava(AsyncClass):
                 activity_date: datetime = datetime.strptime(raw_date['displayDate'], '%B %d, %Y')
 
             comparsion_date: Optional[datetime] = self.filters.get('date')
+
             if comparsion_date is not None:
                 if ((comparsion_date.day, comparsion_date.month, comparsion_date.year) ==
                         (activity_date.day, activity_date.month, activity_date.year)):
