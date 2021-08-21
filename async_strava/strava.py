@@ -382,8 +382,10 @@ class Strava(AsyncClass):
 
         :return - before parameter for next page request. If it's the last page - 0.
         """
+        comparsion_date: Optional[datetime] = self.filters.get('date')
 
-        def validate_react_activity_info(activity_info: dict, raw_date: dict, group_mode: bool = False) -> ActivityInfo:
+        def validate_react_activity_info(activity_info: dict, raw_date: dict,
+                                         group_mode: bool = False) -> Optional[ActivityInfo]:
             # date formatting
             activity_date: datetime = datetime.today()  # today
             if raw_date['displayDate'] == 'Yesterday':
@@ -391,42 +393,44 @@ class Strava(AsyncClass):
             elif raw_date['displayDate'] != 'Today':
                 activity_date: datetime = datetime.strptime(raw_date['displayDate'], '%B %d, %Y')
 
-            comparsion_date: Optional[datetime] = self.filters.get('date')
-
             if comparsion_date is not None:
-                if ((comparsion_date.day, comparsion_date.month, comparsion_date.year) ==
+                # There is a date filter
+                if ((comparsion_date.day, comparsion_date.month, comparsion_date.year) !=
                         (activity_date.day, activity_date.month, activity_date.year)):
+                    # This activity has another date
+                    return None
 
-                    if not group_mode:
-                        title: str = activity_info['activityName']
-                        activity_type: str = activity_info['type']
-                        nickname: str = activity_info['athlete']['athleteName']
-                        href: str = 'https://www.strava.com/activities/' + str(activity_info['id'])
+            # Activity date is in filter
+            if not group_mode:
+                title: str = activity_info['activityName']
+                activity_type: str = activity_info['type']
+                nickname: str = activity_info['athlete']['athleteName']
+                href: str = 'https://www.strava.com/activities/' + str(activity_info['id'])
 
-                        routable: bool = False
-                        tmp_route_checker = activity_info['mapAndPhotos'].get('isRoutable')
-                        if tmp_route_checker is not None:
-                            routable = tmp_route_checker
-                    else:
-                        routable: bool = activity_info['is_routable']
-                        href: str = 'https://www.strava.com/activities/' + str(activity_info['activity_id'])
-                        activity_type: str = activity_info['activity_class_name']
-                        nickname: str = activity_info['athlete_name']
-                        title: str = activity_info['name']
+                routable: bool = False
+                tmp_route_checker = activity_info['mapAndPhotos'].get('isRoutable')
+                if tmp_route_checker is not None:
+                    routable = tmp_route_checker
+            else:
+                routable: bool = activity_info['is_routable']
+                href: str = 'https://www.strava.com/activities/' + str(activity_info['activity_id'])
+                activity_type: str = activity_info['activity_class_name']
+                nickname: str = activity_info['athlete_name']
+                title: str = activity_info['name']
 
-                    return ActivityInfo(routable=routable,
-                                        title=title,
-                                        href=href,
-                                        nickname=nickname,
-                                        type=activity_type,
-                                        date=datetime.strftime(activity_date, '%Y-%m-%d'))
+            return ActivityInfo(routable=routable,
+                                title=title,
+                                href=href,
+                                nickname=nickname,
+                                type=activity_type,
+                                date=datetime.strftime(activity_date, '%Y-%m-%d'))
 
         before: int = 0
         try:
             response = await self._get_response(page_url)
         except ServerError as exc:
             LOGGER.info('status %s - %s', page_url, repr(exc))
-            return before
+            return 0
 
         soup = await self._get_soup(await response.text())
         activities: list = soup.select('div.content.web-feed-4-component')
