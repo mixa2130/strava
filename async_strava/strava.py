@@ -329,34 +329,36 @@ class Strava(AsyncClass):
 
         return {'device': device, 'gear': tuple(gear)}
 
-    def _form_activity_info(self, activity_href: str, title_block, activity_summary) -> Optional[ActivityInfo]:
+    def _form_activity_info(self, activity_href: str, header, activity_summary) -> Optional[ActivityInfo]:
         """
-        :raise ActivityNotExist
         :raise ParserError
-        :return:
-        """
 
+        :return: None - Activity not corresponding filters/Parser error,
+                 ActivityInfo - ok
+        """
+        comparsion_date: Optional[datetime] = self.filters.get('date')
         try:
-            # title text looks like '\nDiana Kurganova\n–\nWorkout\n'
-            nickname, activity_type = title_block.text.split(chr(8211))
             activity_details = activity_summary.select_one('div.details')
 
             # date looks like '11:40 AM on Sunday, August 22, 2021'
             raw_date: str = activity_details.select_one('time').text
             split_date: list = raw_date.split(',')
-
             activity_date: datetime = datetime.strptime(split_date[-2].strip() + ' ' + split_date[-1].strip(),
                                                         '%B %d %Y')
-            title = activity_details.select_one('.activity-name').text
 
-            comparsion_date: Optional[datetime] = self.filters.get('date')
             if comparsion_date is not None:
                 # There is a date filter
+
                 if ((comparsion_date.day, comparsion_date.month, comparsion_date.year) !=
                         (activity_date.day, activity_date.month, activity_date.year)):
-                    # This activity has another date
+                    # This activity has not corresponding date
                     return None
 
+            # title text looks like '\nDiana Kurganova\n–\nWorkout\n'
+            nickname, activity_type = header.text.split(chr(8211))
+            title = activity_details.select_one('.activity-name').text
+
+            # Filters and exceptions has been passed
             return ActivityInfo(routable=True,
                                 href=activity_href,
                                 nickname=nickname.strip(),
@@ -364,6 +366,7 @@ class Strava(AsyncClass):
                                 date=datetime.strftime(activity_date, '%Y-%m-%d'),
                                 title=title.strip()
                                 )
+
         except Exception as exc:
             raise ParserError(activity_href, repr(exc))
 
@@ -376,6 +379,12 @@ class Strava(AsyncClass):
             3) device section - device, gear blocks. - temporarily unavailable
 
         :param activity_href: activity page uri
+        :param activity_info: activity info from club recent activities page
+
+        :raise ActivityNotExist - Activity has been deleted
+
+        :return: None - Activity not exist more/Parser or Server error/Activity not corresponding filters,
+                 Activity - ok
         """
         try:
             response = await self._get_response(activity_href)
@@ -395,12 +404,14 @@ class Strava(AsyncClass):
             if activity_info is None:
                 # Single activity mode. Firstly has to prepare activity_info
                 raw_act_info: Optional[ActivityInfo] = self._form_activity_info(activity_href=activity_href,
-                                                                                title_block=title_block,
+                                                                                header=title_block,
                                                                                 activity_summary=soup.select_one(
                                                                                     'div.details-container'))
                 if raw_act_info is None:
                     # filters check failed
                     return None
+
+                # Activity corresponding filters
                 activity_info: ActivityInfo = raw_act_info
 
             # Distance, Moving time, Pace blocks
