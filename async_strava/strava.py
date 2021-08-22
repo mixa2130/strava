@@ -329,7 +329,7 @@ class Strava(AsyncClass):
 
         return {'device': device, 'gear': tuple(gear)}
 
-    def _form_activity_info(self, activity_href: str, activity_info, title_block, activity_summary):
+    def _form_activity_info(self, activity_href: str, title_block, activity_summary) -> Optional[ActivityInfo]:
         """
         :raise ActivityNotExist
         :raise ParserError
@@ -348,6 +348,14 @@ class Strava(AsyncClass):
             activity_date: datetime = datetime.strptime(split_date[-2].strip() + ' ' + split_date[-1].strip(),
                                                         '%B %d %Y')
             title = activity_details.select_one('.activity-name').text
+
+            comparsion_date: Optional[datetime] = self.filters.get('date')
+            if comparsion_date is not None:
+                # There is a date filter
+                if ((comparsion_date.day, comparsion_date.month, comparsion_date.year) !=
+                        (activity_date.day, activity_date.month, activity_date.year)):
+                    # This activity has another date
+                    return None
 
             return ActivityInfo(routable=True,
                                 href=activity_href,
@@ -385,11 +393,15 @@ class Strava(AsyncClass):
                 raise ActivityNotExist(activity_href)
 
             if activity_info is None:
-                activity_info: ActivityInfo = self._form_activity_info(activity_href=activity_href,
-                                                                       title_block=title_block,
-                                                                       activity_summary=soup.select_one(
-                                                                           'div.details-container'),
-                                                                       activity_info=activity_info)
+                # Single activity mode. Firstly has to prepare activity_info
+                raw_act_info: Optional[ActivityInfo] = self._form_activity_info(activity_href=activity_href,
+                                                                                title_block=title_block,
+                                                                                activity_summary=soup.select_one(
+                                                                                    'div.details-container'))
+                if raw_act_info is None:
+                    # filters check failed
+                    return None
+                activity_info: ActivityInfo = raw_act_info
 
             # Distance, Moving time, Pace blocks
             # If there are no inline section - that's a problem(cause it's the most important section),
