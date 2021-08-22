@@ -329,8 +329,49 @@ class Strava(AsyncClass):
 
         return {'device': device, 'gear': tuple(gear)}
 
-    async def _process_activity_page(self, activity_href: str,
-                                     activity_info: ActivityInfo = None) -> Optional[Activity]:
+    def _form_activity_info(self, activity_href: str, header, activity_summary) -> Optional[ActivityInfo]:
+        """
+        :raise ParserError
+
+        :return: None - Activity not corresponding filters/Parser error,
+                 ActivityInfo - ok
+        """
+        comparsion_date: Optional[datetime] = self.filters.get('date')
+        try:
+            activity_details = activity_summary.select_one('div.details')
+
+            # date looks like '11:40 AM on Sunday, August 22, 2021'
+            raw_date: str = activity_details.select_one('time').text
+            split_date: list = raw_date.split(',')
+            activity_date: datetime = datetime.strptime(split_date[-2].strip() + ' ' + split_date[-1].strip(),
+                                                        '%B %d %Y')
+
+            if comparsion_date is not None:
+                # There is a date filter
+
+                if ((comparsion_date.day, comparsion_date.month, comparsion_date.year) !=
+                        (activity_date.day, activity_date.month, activity_date.year)):
+                    # This activity has not corresponding date
+                    return None
+
+            # title text looks like '\nDiana Kurganova\n–\nWorkout\n'
+            nickname, activity_type = header.text.split(chr(8211))
+            title = activity_details.select_one('.activity-name').text
+
+            # Filters and exceptions has been passed
+            return ActivityInfo(routable=True,
+                                href=activity_href,
+                                nickname=nickname.strip(),
+                                type=activity_type.strip(),
+                                date=datetime.strftime(activity_date, '%Y-%m-%d'),
+                                title=title.strip()
+                                )
+
+        except Exception as exc:
+            raise ParserError(activity_href, repr(exc))
+
+    async def process_activity_page(self, activity_href: str,
+                                    activity_info: ActivityInfo = None) -> Optional[Activity]:
         """
         Processes activity page, which contains 3 importable sections for us:
             1) inline-stats section - distance, moving time, pace blocks;
@@ -338,6 +379,12 @@ class Strava(AsyncClass):
             3) device section - device, gear blocks. - temporarily unavailable
 
         :param activity_href: activity page uri
+        :param activity_info: activity info from club recent activities page
+
+        :raise ActivityNotExist - Activity has been deleted
+
+        :return: None - Activity not exist more/Parser or Server error/Activity not corresponding filters,
+                 Activity - ok
         """
         try:
             response = await self._get_response(activity_href)
@@ -354,7 +401,18 @@ class Strava(AsyncClass):
                 # If there is no activity title - then we've been redirected to the dashboard
                 raise ActivityNotExist(activity_href)
 
-            # There maybe no such blocks as inline/more_stats.
+            if activity_info is None:
+                # Single activity mode. Firstly has to prepare activity_info
+                raw_act_info: Optional[ActivityInfo] = self._form_activity_info(activity_href=activity_href,
+                                                                                header=title_block,
+                                                                                activity_summary=soup.select_one(
+                                                                                    'div.details-container'))
+                if raw_act_info is None:
+                    # filters check failed
+                    return None
+
+                # Activity corresponding filters
+                activity_info: ActivityInfo = raw_act_info
 
             # Distance, Moving time, Pace blocks
             # If there are no inline section - that's a problem(cause it's the most important section),
@@ -448,7 +506,7 @@ class Strava(AsyncClass):
                     continue
 
                 tasks.append(asyncio.create_task(
-                    self._process_activity_page(activity_info=validate_info, activity_href=validate_info.href)))
+                    self.process_activity_page(activity_info=validate_info, activity_href=validate_info.href)))
             else:
                 # Group mode
                 for group_el in activity_desc.get('rowData').get('activities'):
@@ -458,8 +516,8 @@ class Strava(AsyncClass):
                     if validate_info is None:
                         continue
 
-                    tasks.append(asyncio.create_task(self._process_activity_page(activity_info=validate_info,
-                                                                                 activity_href=validate_info.href)))
+                    tasks.append(asyncio.create_task(self.process_activity_page(activity_info=validate_info,
+                                                                                activity_href=validate_info.href)))
         return before
 
     @staticmethod
