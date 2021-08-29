@@ -88,7 +88,7 @@ class Strava(AsyncClass):
 
     async def connection_check(self, request_response) -> bool:
         """
-        Checks the strava page connection by parsing the html code
+        Checks the strava page connection by parsing the html code.
 
 
         :returns: - True - the connection is establish;
@@ -112,11 +112,12 @@ class Strava(AsyncClass):
     async def _session_reconnecting(self) -> int:
         """
         Updates or reconnects strava session.
+        This function will be removed in next releases, if it would be unnecessary during tests
 
         :return: 0 - session established;
                  -1 - can't reconnect
         """
-        allowed_attempts: int = 3
+        allowed_attempts: int = 2
 
         for check_counter in range(allowed_attempts):
             # This one will try to reconnect the session,
@@ -136,7 +137,7 @@ class Strava(AsyncClass):
 
     @staticmethod
     async def _get_soup(html_text: str):
-        """Executes blocking task in an executor - another thread"""
+        """Executes blocking task(dom tree parser)  in an executor - another thread"""
         soup_loop = asyncio.get_running_loop()
         return await soup_loop.run_in_executor(None, bs_object, html_text)
 
@@ -147,13 +148,17 @@ class Strava(AsyncClass):
 
         :param uri: requested page
 
-        # :raise StravaSessionFailed: if unable to reconnect or update strava session
+        :raise StravaTooManyRequests: too many requests per time unit -
+         strava won't let us in for 10 minutes at least
+        :raise ServerError: strava server doesn't answer
+
         :return: request result obj
         """
         response = await self._session.get(uri)
         status_code = response.status
 
         if status_code != 200:
+            # Redirecting would be processed in page handlers
 
             if status_code == 429:
                 # This error will cancel connection.
@@ -162,7 +167,7 @@ class Strava(AsyncClass):
 
             if status_code - 400 >= 0:
                 # try to reconnect
-                LOGGER.info(f'try ro reconnect:{status_code}')
+                LOGGER.info(f'try ro reconnect status code:{status_code}')
                 await asyncio.sleep(5)
 
                 response = await self._session.get(uri)
@@ -171,14 +176,18 @@ class Strava(AsyncClass):
 
         return response
 
+    ### REMAKE!!!
     async def get_strava_nickname_from_uri(self, profile_uri: str) -> str:
         """
         Gets nickname from strava user profile page.
         If page not found - def will return '' - an empty str.
 
+        :NOTE: ServerError processed here
+
         :param profile_uri: strava user profile uri
         :raise StravaTooManyRequests: too many requests per time unit -
          strava won't let us in for 10 minutes at least
+
         :return: user nickname from transmitted uri
         """
         try:
@@ -200,11 +209,22 @@ class Strava(AsyncClass):
         :param activity_href: activity uri
         :param stat_section: inline-stats section html cluster
 
-        :raise ActivityNotExist: Activity has been deleted
+        :raise ParserError: website inline section front has changed
+
         :return {distance:, moving_time:, pace:}
         """
 
         def str_time_to_sec(_time: list) -> int:
+            """
+            Converts time in str view to seconds
+
+            :param _time: list of separated str values: 14:59->[14,59]
+
+            :return: number of elapsed seconds
+
+            :example: pace 14:59 comes to the function like [14, 59].
+            Function returns 14*60+59=899 seconds
+            """
             _seconds: int = 0
             n = len(_time) - 1
 
@@ -215,6 +235,11 @@ class Strava(AsyncClass):
             return _seconds
 
         def validate_str_value(el) -> int:
+            """
+            Values from website often contains letters, like '2s' or '15km/sec'.
+            This function retrieves numbers from such el.
+            If el doesn't contain numbers - returns 0.
+            """
             tmp_val = re.search(r'\d+', el)
             if tmp_val is not None:
                 return int(tmp_val.group(0))
@@ -259,6 +284,8 @@ class Strava(AsyncClass):
 
         :param more_stats_section: more-stats section html cluster
 
+        :raise ParserError: website more stats section front has changed
+
         :return: {elevation_gain:, calories:}
         """
         elevation_gain: int = 0
@@ -297,6 +324,7 @@ class Strava(AsyncClass):
     @staticmethod
     def _process_device_section(device_cluster, activity_href) -> dict:
         """
+        !!!Temporarily unavailable!!!
         Processes activity page device section.
 
         :param device_cluster: device section html cluster
@@ -330,7 +358,9 @@ class Strava(AsyncClass):
 
     def _form_activity_info(self, activity_href: str, header, activity_summary) -> Optional[ActivityInfo]:
         """
-        :raise ParserError
+        Forms ActivityInfo from the data from site page.
+
+        :raise ParserError: website more stats section front has changed
 
         :return: None - Activity not corresponding filters/Parser error,
                  ActivityInfo - ok
@@ -381,6 +411,7 @@ class Strava(AsyncClass):
         :param activity_info: activity info from club recent activities page
 
         :raise ActivityNotExist - Activity has been deleted
+        :processes Exceptions: ActivityNotExist, ParserError
 
         :return: None - Activity not exist more/Parser or Server error/Activity not corresponding filters,
                  Activity - ok
@@ -435,7 +466,10 @@ class Strava(AsyncClass):
 
     async def _get_tasks(self, page_url: str, tasks: list) -> int:
         """
-        Create tasks of single and group activities for concurrently execution
+        Create tasks of single and group activities for concurrently execution.
+
+        :processes Exceptions: ParserError
+
 
         :return - before parameter for next page request. If it's the last page - 0.
         """
@@ -487,7 +521,7 @@ class Strava(AsyncClass):
             response = await self._get_response(page_url)
         except ServerError as exc:
             LOGGER.info('status %s - %s', page_url, repr(exc))
-            return 0
+            return -1
 
         soup = await self._get_soup(await response.text())
         activities: list = soup.select('div.content.web-feed-4-component')
@@ -530,8 +564,6 @@ class Strava(AsyncClass):
                 json_activity['info']: ActivityInfo = tmp_activity_info._asdict()
                 validate_results.append(json_activity)
 
-        with open('results.json', 'w') as json_file:
-            json.dump(validate_results, json_file)
         return {'results': validate_results}
 
     async def get_club_activities(self, club_id: int):
@@ -548,6 +580,8 @@ class Strava(AsyncClass):
         before: int = await self._get_tasks(club_activities_page_url, activities_tasks)
 
         while before != 0:
+            if before == -1:
+                return None
             print(before)
             before: int = await self._get_tasks(
                 club_activities_page_url + f'&before={before}&cursor={float(before)}',
