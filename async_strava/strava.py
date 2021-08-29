@@ -35,10 +35,6 @@ handler.setFormatter(formatter)
 LOGGER.addHandler(handler)
 
 
-def bs_object(text):
-    return Bs(text, 'html.parser')
-
-
 class Strava(AsyncClass):
     """Main class for interacting  with www.strava.com website"""
 
@@ -138,8 +134,12 @@ class Strava(AsyncClass):
     @staticmethod
     async def _get_soup(html_text: str):
         """Executes blocking task(dom tree parser)  in an executor - another thread"""
+
+        def _bs_object(text):
+            return Bs(text, 'html.parser')
+
         soup_loop = asyncio.get_running_loop()
-        return await soup_loop.run_in_executor(None, bs_object, html_text)
+        return await soup_loop.run_in_executor(None, _bs_object, html_text)
 
     async def _get_response(self, uri):
         """
@@ -167,7 +167,7 @@ class Strava(AsyncClass):
 
             if status_code - 400 >= 0:
                 # try to reconnect
-                LOGGER.info(f'try ro reconnect status code:{status_code}')
+                LOGGER.info('try ro reconnect status code: %i', status_code)
                 await asyncio.sleep(5)
 
                 response = await self._session.get(uri)
@@ -226,11 +226,11 @@ class Strava(AsyncClass):
             Function returns 14*60+59=899 seconds
             """
             _seconds: int = 0
-            n = len(_time) - 1
+            _n = len(_time) - 1
 
             for time_el in _time:
-                _seconds += int(time_el) * pow(60, n)
-                n -= 1
+                _seconds += int(time_el) * pow(60, _n)
+                _n -= 1
 
             return _seconds
 
@@ -468,8 +468,9 @@ class Strava(AsyncClass):
         """
         Create tasks of single and group activities for concurrently execution.
 
-        :processes Exceptions: ParserError
-
+        :processes Exceptions: ServerError: -1 if a serverError has happened.
+        This was done to indicate when we've failed and don't lose some activities,
+        which may be father.
 
         :return - before parameter for next page request. If it's the last page - 0.
         """
@@ -554,7 +555,7 @@ class Strava(AsyncClass):
         return before
 
     @staticmethod
-    def results_validator(results: List[Activity]) -> dict:
+    def to_json(results: List[Activity]) -> dict:
         validate_results = list()
         for activity in results:
             if activity is not None:
@@ -582,12 +583,13 @@ class Strava(AsyncClass):
         while before != 0:
             if before == -1:
                 return None
-            print(before)
+
+            print(f'processing page_id: {before}')
             before: int = await self._get_tasks(
                 club_activities_page_url + f'&before={before}&cursor={float(before)}',
                 activities_tasks)
 
-        return self.results_validator(await asyncio.gather(*activities_tasks))
+        return self.to_json(await asyncio.gather(*activities_tasks))
 
     def check_connection_setup(self) -> bool:
         return self.connection_established
@@ -612,7 +614,8 @@ async def strava_connector(login: str, password: str, filters: dict = None):
     Available RuntimeError: generator didn't yield
     :param login: strava login
     :param password: strava password
-    :param filters:
+    :param filters: {'date': datetime(day=, month=, year=)}
+    - will check each activity for compliance with the specified date
 
     :raise StravaSessionFailed: if unable to reconnect or update strava session
     """
