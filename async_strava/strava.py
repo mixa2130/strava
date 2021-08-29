@@ -214,6 +214,12 @@ class Strava(AsyncClass):
 
             return _seconds
 
+        def validate_str_value(el) -> int:
+            tmp_val = re.search(r'\d+', el)
+            if tmp_val is not None:
+                return int(tmp_val.group(0))
+            return 0
+
         distance: float = 0.0
         moving_time: int = 0
         pace: int = 0
@@ -234,19 +240,12 @@ class Strava(AsyncClass):
                         # else it would be a default value
 
                 if cluster_type in ('Moving Time', 'Elapsed Time', 'Duration'):
-                    moving_time: int = str_time_to_sec(cluster.split(':'))
+                    divided_moving_time: List[str] = cluster.split(':')  # ['2s'] [1, 18, 53]
+                    moving_time: int = str_time_to_sec(list(map(validate_str_value, divided_moving_time)))
 
                 if cluster_type == 'Pace':
                     divided_pace: List[str] = cluster.split(':')  # ['7', '18/km'] ['7s/km']
-                    raw_pace_vls: List[int] = []
-
-                    for index, value in enumerate(divided_pace):
-                        str_value = re.search(r'\d+', value)
-
-                        if str_value is not None:
-                            raw_pace_vls.append(int(str_value.group(0)))
-
-                    pace: int = str_time_to_sec(raw_pace_vls)
+                    pace: int = str_time_to_sec(list(map(validate_str_value, divided_pace)))
 
             return {'distance': distance, 'moving_time': moving_time, 'pace': pace}
 
