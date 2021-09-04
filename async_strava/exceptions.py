@@ -25,16 +25,6 @@ class ServerError(Exception):
         return f"{self.code} - Server error"
 
 
-# class NonRunActivity(Exception):
-#     """Non-running activity, such as cardio"""
-#
-#     def __init__(self, activity_uri: str):
-#         self.uri = activity_uri
-#
-#     def __repr__(self):
-#         return f"Non-running activity {self.uri}"
-
-
 class ActivityNotExist(Exception):
     """
     Activity might be deleted recently.

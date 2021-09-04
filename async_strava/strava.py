@@ -176,7 +176,6 @@ class Strava(AsyncClass):
 
         return response
 
-    ### REMAKE!!!
     async def get_strava_nickname_from_uri(self, profile_uri: str) -> str:
         """
         Gets nickname from strava user profile page.
@@ -358,7 +357,7 @@ class Strava(AsyncClass):
 
     def _form_activity_info(self, activity_href: str, header, activity_summary) -> Optional[ActivityInfo]:
         """
-        Forms ActivityInfo from the data from site page.
+        Forms ActivityInfo from the data received from the site page.
 
         :raise ParserError: website more stats section front has changed
 
@@ -405,15 +404,15 @@ class Strava(AsyncClass):
         Processes activity page, which contains 3 importable sections for us:
             1) inline-stats section - distance, moving time, pace blocks;
             2) more-stats section - elevation gain, calories blocks;
-            3) device section - device, gear blocks. - temporarily unavailable
+            3) device section - device, gear blocks. - temporarily unavailable.
 
         :param activity_href: activity page uri
         :param activity_info: activity info from club recent activities page
 
-        :raise ActivityNotExist - Activity has been deleted
+        :raise ActivityNotExist: Activity has been deleted
         :processes Exceptions: ActivityNotExist, ParserError
 
-        :return: None - Activity not exist more/Parser or Server error/Activity not corresponding filters,
+        :return: None - Activity not exist anymore/Parser or Server error/Activity not corresponding filters,
                  Activity - ok
         """
         try:
@@ -468,11 +467,12 @@ class Strava(AsyncClass):
         """
         Create tasks of single and group activities for concurrently execution.
 
-        :processes Exceptions: ServerError: -1 if a serverError has happened.
+        :processes Exceptions: ServerError: returns before=-1 if a serverError has happened.
         This was done to indicate when we've failed and don't lose some activities,
         which may be father.
 
         :return - before parameter for next page request. If it's the last page - 0.
+        If an error has happened - -1
         """
         comparsion_date: Optional[datetime] = self.filters.get('date')
 
@@ -567,12 +567,12 @@ class Strava(AsyncClass):
 
         return {'results': validate_results}
 
-    async def get_club_activities(self, club_id: int):
+    async def get_club_activities(self, club_id: int) -> Optional[dict]:
         """
         Get club activities, presented in https://www.strava.com/clubs/{club_id}/recent_activity page.
         Retrieves as single, as group activities.
 
-        :return: the result generator, which yields objects of the Activity class
+        :return: JSON serializable/None if an error during parsing has happened
         """
         club_activities_page_url: str = f'https://www.strava.com/clubs/{str(club_id)}/feed?feed_type=club'
 
@@ -581,7 +581,9 @@ class Strava(AsyncClass):
         before: int = await self._get_tasks(club_activities_page_url, activities_tasks)
 
         while before != 0:
+
             if before == -1:
+                # ServerError
                 return None
 
             print(f'processing page_id: {before}')
