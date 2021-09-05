@@ -30,3 +30,4 @@ requests>=2.25.1
 docopt>=0.6.2
 pyparsing>=2.4.7
 wheel>=0.37.0
+async-class>=0.3.0
