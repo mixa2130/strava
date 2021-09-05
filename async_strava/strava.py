@@ -167,7 +167,7 @@ class Strava(AsyncClass):
 
             if status_code - 400 >= 0:
                 # try to reconnect
-                LOGGER.info('try ro reconnect status code: %i', status_code)
+                LOGGER.info('try ro reconnect, status code: %i', status_code)
                 await asyncio.sleep(5)
 
                 response = await self._session.get(uri)
@@ -196,9 +196,13 @@ class Strava(AsyncClass):
             return ''
 
         soup = await self._get_soup(await response.text())
-        title = soup.select_one('title').text
 
-        return title[(title.find('| ') + 2):]
+        raw_title = soup.select_one('h1.athlete-name')
+        if raw_title is None:
+            LOGGER.info('Incorrect link - there are no strava title at %s', profile_uri)
+            return ''
+
+        return raw_title.text
 
     @staticmethod
     def _process_inline_section(stat_section, activity_href: str) -> dict:
