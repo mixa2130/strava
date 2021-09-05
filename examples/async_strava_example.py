@@ -1,12 +1,10 @@
-"""An example of using Strava.get_strava_nickname_from_uri from async_class package"""
-import asyncio
+"""An example of using async_strava package"""
 import os
-
+import datetime
 from typing import List, NoReturn
+
+import asyncio
 from dotenv import load_dotenv
-# from async_strava.attributes import Activity, ActivityValues
-# import datetime
-# import async_strava
 from async_strava import strava_connector
 
 
@@ -38,26 +36,20 @@ async def get_nicknames(strava_obj) -> List[str]:
         return results
 
 
-async def get_activities(strava_obj):
-    # await strava_obj._process_activity_page('https://www.strava.com/activities/5777262591')
-    # await strava_obj._process_activity_page('https://www.strava.com/activities/5776569939')
-    # print(res)
-    results = await strava_obj.get_club_activities(786435)
-    # results = await strava_obj.get_club_activities(558646)
-
-
 async def main() -> NoReturn:
     """Example executor"""
     _login: str = os.getenv('LOGIN')
     _password: str = os.getenv('PASSWORD')
 
-    async with strava_connector(_login, _password) as strava_obj:
-        await get_activities(strava_obj)
-        # nicknames: list = await get_nicknames(strava_obj)
-        # print(nicknames)
+    async with strava_connector(_login, _password,
+                                filters={'date': datetime.datetime(year=2021, month=9, day=3)}) as strava_obj:
+        activities: dict = await strava_obj.get_club_activities(786435)
+        print(len(activities))
+
+        nicknames: list = await get_nicknames(strava_obj)
+        print(len(nicknames))
 
 
 if __name__ == '__main__':
     load_dotenv()
-
     asyncio.run(main())
