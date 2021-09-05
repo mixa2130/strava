@@ -1,3 +1,4 @@
+"""I'm so sorry for the pre-release bug"""
 import os
 from setuptools import setup
 
