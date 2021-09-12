@@ -2,6 +2,8 @@
 Ignoring non run activities
 
 None in results of club_activities represents an error in activity. For example - ActivityNotExist
+429 - StravaTooManyRequests is called:
+ - When the user goes to the activity page.
 """
 import logging
 import re
@@ -421,8 +423,9 @@ class Strava(AsyncClass):
         """
         try:
             response = await self._get_response(activity_href)
-        except ServerError as exc:
-            LOGGER.info('status %s - %s', activity_href, repr(exc))
+        except (ServerError, StravaTooManyRequests) as exc:
+            LOGGER.error('Exception in %s - %s', activity_href, repr(exc))
+            self.connection_established = False
             return None
 
         soup = await self._get_soup(await response.text())
@@ -522,16 +525,22 @@ class Strava(AsyncClass):
                                 date=datetime.strftime(activity_date, '%Y-%m-%d'))
 
         before: int = 0
+
         try:
             response = await self._get_response(page_url)
         except ServerError as exc:
-            LOGGER.info('status %s - %s', page_url, repr(exc))
+            LOGGER.error('status %s - %s', page_url, repr(exc))
             return -1
 
         soup = await self._get_soup(await response.text())
         activities: list = soup.select('div.content.web-feed-4-component')
 
         for activity in activities:
+
+            if not self.connection_established:
+                # Strava too many requests
+                return -1
+
             activity_desc: dict = json.loads(activity.get('data-react-props'))
             before: int = activity_desc['cursorData']['updated_at']
 
@@ -587,7 +596,9 @@ class Strava(AsyncClass):
         while before != 0:
 
             if before == -1:
-                # ServerError
+                # ServerError or StravaTooManyRequests
+                a = list(map(lambda task: task.cancel(), activities_tasks))
+                print(a)
                 return None
 
             print(f'processing page_id: {before}')
@@ -639,5 +650,5 @@ async def strava_connector(login: str, password: str, filters: dict = None):
 
     finally:
         await small_strava.close()
-        await shutdown()
+        # await shutdown()
         LOGGER.info('Session closed')
