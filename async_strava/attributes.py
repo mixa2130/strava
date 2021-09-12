@@ -1,5 +1,4 @@
 from typing import NamedTuple
-from datetime import datetime
 
 
 class ActivityInfo(NamedTuple):
