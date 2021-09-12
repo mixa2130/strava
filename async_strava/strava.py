@@ -40,19 +40,21 @@ LOGGER.addHandler(handler)
 class Strava(AsyncClass):
     """Main class for interacting  with www.strava.com website"""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(args, kwargs)
+        self.connection_established = False
+
     async def __ainit__(self, login: str, password: str, filters: dict) -> NoReturn:
         self._session = aiohttp.ClientSession()
         self._login: str = login
         self._password: str = password
 
         self.filters: dict = filters
-        self.connection_established: bool = False
 
         connection = await self._session_reconnecting()
         if connection == 0:
             self.connection_established = True
-        else:
-            raise StravaSessionFailed
+
         # Session connection failure during initialization would be proceed in a context manager
 
     async def _strava_authorization(self):
@@ -152,7 +154,7 @@ class Strava(AsyncClass):
 
         :raise StravaTooManyRequests: too many requests per time unit -
          strava won't let us in for 10 minutes at least
-        :raise ServerError: strava server doesn't answer
+        :raise ServerError: strava server doesn't answer, or invalid uri
 
         :return: request result obj
         """
@@ -167,10 +169,14 @@ class Strava(AsyncClass):
                 # Therefore, within the framework of this class, it is not processed
                 raise StravaTooManyRequests
 
-            if status_code - 400 >= 0:
+            if 0 <= status_code - 400 < 100:
+                # Client error
+                raise ServerError(status_code)
+
+            if status_code - 500 >= 0:
                 # try to reconnect
                 LOGGER.info('try ro reconnect, status code: %i', status_code)
-                await asyncio.sleep(5)
+                await asyncio.sleep(7)
 
                 response = await self._session.get(uri)
                 if response.status != 200:
@@ -178,10 +184,11 @@ class Strava(AsyncClass):
 
         return response
 
-    async def get_strava_nickname_from_uri(self, profile_uri: str) -> str:
+    async def get_strava_nickname_from_uri(self, profile_uri: str) -> Optional[str]:
         """
         Gets nickname from strava user profile page.
         If page not found - def will return '' - an empty str.
+        If incorrect link - None.
 
         :NOTE: ServerError processed here
 
@@ -194,7 +201,7 @@ class Strava(AsyncClass):
         try:
             response = await self._get_response(profile_uri)
         except ServerError as exc:
-            LOGGER.info('status %s - %s', profile_uri, repr(exc))
+            LOGGER.error('ServerError in %s - %s', profile_uri, repr(exc))
             return ''
 
         soup = await self._get_soup(await response.text())
@@ -202,7 +209,7 @@ class Strava(AsyncClass):
         raw_title = soup.select_one('h1.athlete-name')
         if raw_title is None:
             LOGGER.info('Incorrect link - there are no strava title at %s', profile_uri)
-            return ''
+            return None
 
         return raw_title.text
 
@@ -416,16 +423,24 @@ class Strava(AsyncClass):
         :param activity_info: activity info from club recent activities page
 
         :raise ActivityNotExist: Activity has been deleted
-        :processes Exceptions: ActivityNotExist, ParserError
+
+        :NOTE: ActivityNotExist, ServerError, StravaTooManyRequests, ParserError processed here
 
         :return: None - Activity not exist anymore/Parser or Server error/Activity not corresponding filters,
                  Activity - ok
         """
         try:
             response = await self._get_response(activity_href)
-        except (ServerError, StravaTooManyRequests) as exc:
-            LOGGER.error('Exception in %s - %s', activity_href, repr(exc))
+        except StravaTooManyRequests as exc:
+            LOGGER.info('Exception in %s - %s', activity_href, repr(exc))
+
+            # Too many requests per time unit - there's no point in continuing
             self.connection_established = False
+            return None
+
+        except ServerError as exc:
+            LOGGER.error('Exception in %s - %s', activity_href, repr(exc))
+
             return None
 
         soup = await self._get_soup(await response.text())
@@ -467,16 +482,19 @@ class Strava(AsyncClass):
             activity_values: dict = {**inline_section, **more_stats_section}
             return Activity(info=activity_info, values=activity_values)
 
-        except (ActivityNotExist, ParserError) as exc:
+        except ActivityNotExist as exc:
             LOGGER.info(repr(exc))
+
+        except ParserError as exc:
+            LOGGER.error(repr(exc))
 
     async def _get_tasks(self, page_url: str, tasks: list) -> int:
         """
         Create tasks of single and group activities for concurrently execution.
 
-        :processes Exceptions: ServerError: returns before=-1 if a serverError has happened.
-        This was done to indicate when we've failed and don't lose some activities,
-        which may be father.
+        :NOTE: ServerError - returns before=-1 if a serverError has happened.
+            This was done to indicate when we've failed and don't lose some activities,
+            which may be father.
 
         :return - before parameter for next page request. If it's the last page - 0.
         If an error has happened - -1
@@ -580,31 +598,39 @@ class Strava(AsyncClass):
 
         return {'results': validate_results}
 
+    @staticmethod
+    def _close_unfinished_tasks(tasks):
+        list(map(lambda task: task.cancel(), tasks))
+        LOGGER.info('All opened tasks are finished')
+
     async def get_club_activities(self, club_id: int) -> Optional[dict]:
         """
         Get club activities, presented in https://www.strava.com/clubs/{club_id}/recent_activity page.
         Retrieves as single, as group activities.
 
-        :return: JSON serializable/None if an error during parsing has happened
+        :return: JSON serializable/None - if an error during parsing has happened
         """
         club_activities_page_url: str = f'https://www.strava.com/clubs/{str(club_id)}/feed?feed_type=club'
-
-        # Start pages processing
-        activities_tasks = list()
+        activities_tasks: List[asyncio.Task] = list()
         before: int = await self._get_tasks(club_activities_page_url, activities_tasks)
 
-        while before != 0:
+        if before != -1:
+            while before != 0:
 
-            if before == -1:
-                # ServerError or StravaTooManyRequests
-                a = list(map(lambda task: task.cancel(), activities_tasks))
-                print(a)
-                return None
+                if before == -1:
+                    # StravaTooManyRequests or ServerError in new page request.
+                    # Have to close opened tasks for the correct ending
+                    self._close_unfinished_tasks(activities_tasks)
+                    return None
 
-            print(f'processing page_id: {before}')
-            before: int = await self._get_tasks(
-                club_activities_page_url + f'&before={before}&cursor={float(before)}',
-                activities_tasks)
+                print(f'processing page_id: {before}')
+                before: int = await self._get_tasks(
+                    club_activities_page_url + f'&before={before}&cursor={float(before)}',
+                    activities_tasks)
+        else:
+            # We've failed directly in the start
+            self._close_unfinished_tasks(activities_tasks)
+            return None
 
         return self.to_json(await asyncio.gather(*activities_tasks))
 
@@ -615,28 +641,19 @@ class Strava(AsyncClass):
         await self._session.close()
 
 
-async def shutdown():
-    """Closes unfinished tasks"""
-    tasks = [task for task in asyncio.Task.all_tasks() if task is not
-             asyncio.tasks.Task.current_task()]
-    list(map(lambda task: task.cancel(), tasks))
-    LOGGER.info('All tasks are finished')
-
-
 @asynccontextmanager
 async def strava_connector(login: str, password: str, filters: dict = None):
     """
     Context manager for working with instances of Strava class.
 
-    Available RuntimeError: generator didn't yield
     :param login: strava login
     :param password: strava password
-    :param filters: {'date': datetime(day=, month=, year=)}
-    - will check each activity for compliance with the specified date
+    :param filters: {'date': datetime(day=, month=, year=)}.
+     Will check each activity for compliance with the specified date.
 
     :raise StravaSessionFailed: if unable to reconnect or update strava session
+    :raise RuntimeError: generator didn't yield - unable to create session
     """
-
     small_strava = await Strava(login, password, filters if filters is not None else dict())
 
     try:
@@ -650,5 +667,5 @@ async def strava_connector(login: str, password: str, filters: dict = None):
 
     finally:
         await small_strava.close()
-        # await shutdown()
+
         LOGGER.info('Session closed')
