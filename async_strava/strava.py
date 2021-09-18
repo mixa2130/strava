@@ -551,7 +551,7 @@ class Strava(AsyncClass):
             return -1
 
         soup = await self._get_soup(await response.text())
-        activities: list = soup.select('div.content.web-feed-4-component')
+        activities: list = soup.select('div.content')
 
         for activity in activities:
 
