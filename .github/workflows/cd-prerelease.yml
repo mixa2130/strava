@@ -1,4 +1,4 @@
-name: CD-release
+name: CD-prerelease
 
 on:
   release:
