@@ -42,8 +42,8 @@ async def main() -> NoReturn:
     _password: str = os.getenv('PASSWORD')
 
     async with strava_connector(_login, _password,
-                                filters={'date': datetime.datetime(year=2021, month=9, day=3)}) as strava_obj:
-        activities: dict = await strava_obj.get_club_activities(677067)
+                                filters={'date': datetime.datetime(year=2021, month=9, day=18)}) as strava_obj:
+        activities: dict = await strava_obj.get_club_activities(786435)
         print(len(activities['results']), activities)
 
         nicknames: list = await get_nicknames(strava_obj)

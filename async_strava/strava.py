@@ -315,11 +315,8 @@ class Strava(AsyncClass):
 
                     for index, desc in enumerate(descriptions):
                         if desc.text.strip() == 'Elevation':
-                            # We get value in format '129m\n' or '\n129m\n'
-                            elevation = re.search('[0-9]+', values[index].text)
-
-                            if elevation is not None:
-                                elevation_gain = int(elevation.group())
+                            # We get value in format '129m\n' or '\n1,345m\n'
+                            elevation_gain = int(re.sub(r'[,m\n]', r'', values[index].text))
 
                         if desc.text.strip() == 'Calories':
                             calories_value: str = values[index].text.strip()
