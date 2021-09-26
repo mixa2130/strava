@@ -19,6 +19,7 @@ import aiohttp
 
 from bs4 import BeautifulSoup as Bs
 from lxml import html
+from aiohttp.client_exceptions import InvalidURL
 from async_class import AsyncClass
 from .exceptions import StravaSessionFailed, ServerError, StravaTooManyRequests, ActivityNotExist, ParserError
 from .attributes import ActivityInfo, Activity
@@ -200,7 +201,7 @@ class Strava(AsyncClass):
         """
         try:
             response = await self._get_response(profile_uri)
-        except ServerError as exc:
+        except (ServerError, InvalidURL) as exc:
             LOGGER.error('ServerError in %s - %s', profile_uri, repr(exc))
             return ''
 
